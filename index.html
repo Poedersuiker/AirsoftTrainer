@@ -10,7 +10,7 @@
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="apple-touch-icon" href="icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=1.9" />
+  <link rel="stylesheet" href="style.css?v=2.0" />
 </head>
 <body>
   <div class="app-shell">
@@ -58,7 +58,7 @@
         <div class="drawer-brand">
           <img src="icon.svg" alt="Reticle" class="brand-icon" />
           <div>
-            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v1.9</span></strong>
+            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v2.0</span></strong>
             <span id="offlineStatusText" class="drawer-subtitle">Offline PWA Ready</span>
           </div>
         </div>
@@ -75,8 +75,8 @@
           <span class="drawer-link-sub">Configure drills, reps &amp; training queue</span>
         </button>
         <button type="button" class="drawer-link" data-view="view-settings">
-          <span class="drawer-link-title">Settings &amp; Audio</span>
-          <span class="drawer-link-sub">Briefing voice, mic sensitivity &amp; soundboard</span>
+          <span class="drawer-link-title">Settings &amp; Mic Calibration</span>
+          <span class="drawer-link-sub">Calibrate shot sound, noise filter &amp; audio</span>
         </button>
         <button type="button" class="drawer-link" data-view="view-logs">
           <span class="drawer-link-title">Shot Logs (<span id="logCountBadge">0</span>)</span>
@@ -88,7 +88,7 @@
           + Install / Cache Offline App
         </button>
         <div id="installHelpNote" class="helper-text hidden" style="font-size:0.72rem;color:#fde68a;margin-bottom:0.45rem;"></div>
-        <div>App Version: <strong>v1.9</strong></div>
+        <div>App Version: <strong>v2.0</strong></div>
       </div>
     </aside>
 
@@ -439,12 +439,59 @@
 
         <div class="card">
           <div class="card-header">
-            <h2>GBB / Pistol Shot Detection</h2>
-            <span class="badge-subtle">Web Audio Transient Detector</span>
+            <h2>GBB / Pistol Shot Calibration &amp; Noise Filter</h2>
+            <span class="badge-subtle" id="calibrationStatusBadge">Default Profile</span>
           </div>
           <p class="helper-text">
-            Tuned for Gas Blowback (GBB) and CO2 airsoft pistols. The microphone automatically mutes while the app is speaking or beeping so it never triggers on its own sounds.
+            Calibrate the microphone to ignore your room&rsquo;s background noise and learn the exact frequency fingerprint of your specific airsoft pistol so only real shots are registered.
           </p>
+
+          <!-- Guided 2-Step Acoustic Calibration Wizard Box -->
+          <div class="cal-wizard-box" id="calWizardBox">
+            <div class="cal-wizard-top">
+              <strong id="calWizardTitle">2-Step Acoustic Shot Calibration</strong>
+              <span id="calWizardStepBadge" class="cal-step-pill">Ready</span>
+            </div>
+            <p class="cal-wizard-desc" id="calWizardInstruction">
+              Step 1 samples background noise for 3 seconds. Step 2 records 3 shots from your pistol to learn its frequency signature and auto-set your threshold.
+            </p>
+            <div class="cal-progress-track">
+              <div class="cal-progress-fill" id="calProgressFill" style="width: 0%;"></div>
+            </div>
+            <div class="cal-metrics-summary" id="calMetricsSummary">
+              <span>Noise Ceiling: <strong id="calNoiseCeilingVal">--</strong></span>
+              <span>Shot Peak: <strong id="calShotPeakVal">--</strong></span>
+              <span>Learned Profile: <strong id="calProfileStatusVal">None (Default)</strong></span>
+            </div>
+            <div class="button-row" style="margin-top:0.55rem;">
+              <button type="button" id="startCalWizardBtn" class="btn-primary" style="padding:0.65rem 0.6rem;font-size:0.84rem;">
+                Start 2-Step Calibration
+              </button>
+              <button type="button" id="resetCalBtn" class="btn-secondary" style="padding:0.65rem 0.6rem;font-size:0.82rem;">
+                Reset Profile
+              </button>
+            </div>
+          </div>
+
+          <div class="params-grid" style="margin-bottom:0.85rem;">
+            <div class="param-item">
+              <label class="toggle-row" for="signatureFilterCheckbox">
+                <span>Only Hear Specific Shot Sound (Spectral Fingerprint Filter)</span>
+                <input type="checkbox" id="signatureFilterCheckbox" checked />
+              </label>
+            </div>
+          </div>
+
+          <div class="control-group" id="signatureStrictnessWrap">
+            <label for="signatureStrictnessSlider">
+              Shot Sound Signature Match Strictness: <strong id="signatureStrictnessVal">72%</strong>
+            </label>
+            <input type="range" id="signatureStrictnessSlider" min="40" max="92" value="72" />
+            <div class="range-hints">
+              <span>Lenient (40%)</span>
+              <span>Strict Specific Pistol Match (92%)</span>
+            </div>
+          </div>
 
           <div class="control-group">
             <label for="thresholdSlider">
@@ -466,6 +513,10 @@
               <span>Fast Cycling (50ms)</span>
               <span>Heavy Recoil / Indoor Echo (350ms)</span>
             </div>
+          </div>
+
+          <div class="shot-diagnostic-banner" id="shotDiagnosticBanner">
+            Last Spike Test: Enable mic and fire a test shot (or make noise) to see if it is <strong>ACCEPTED</strong> or <strong>REJECTED</strong>.
           </div>
 
           <div class="button-row">
@@ -621,6 +672,6 @@
     </main>
   </div>
 
-  <script src="script.js?v=1.9"></script>
+  <script src="script.js?v=2.0"></script>
 </body>
 </html>

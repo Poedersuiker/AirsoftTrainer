@@ -120,6 +120,32 @@
     voiceThresholdPercent: 18,
     debounceMs: 115,
     lastShotTimestampMs: 0,
+    rollingNoiseFloor: 6,
+
+    // Acoustic Shot Signature Filter & Calibration Profile
+    useSignatureFilter: true,
+    signatureStrictness: 72,
+    calibration: {
+      calibrated: false,
+      noiseCeiling: 12,
+      avgShotPeak: 78,
+      ambientBands: [4, 4, 3, 2, 2, 1],
+      // Default GBB/CO2 normalized 6-band template (strong upper-mid & high crack)
+      shotVector: [0.16, 0.22, 0.36, 0.52, 0.55, 0.47],
+      hfShare: 0.65
+    },
+    calWizard: {
+      active: false,
+      step: 'IDLE', // 'IDLE' | 'NOISE' | 'SHOTS'
+      noiseStartMs: 0,
+      noisePeakSamples: [],
+      noiseBandSamples: [],
+      recordedShots: [],
+      pendingCaptureFrames: 0,
+      pendingBestPeak: 0,
+      pendingBestBands: null,
+      lastCalShotMs: 0
+    },
 
     // Self-Audio Lockout & "Ready" Vocal Envelope State
     muteShotDetectionUntilMs: 0,
@@ -145,7 +171,8 @@
 
   const STORAGE_KEYS = {
     LOGS: 'airsoft_trainer_logs_v1',
-    QUEUE: 'airsoft_trainer_queue_v2'
+    QUEUE: 'airsoft_trainer_queue_v2',
+    CALIBRATION: 'airsoft_trainer_calibration_v1'
   };
 
   // ==========================================
@@ -255,6 +282,23 @@
     ),
     requireReadyVoiceCheckbox: document.getElementById('requireReadyVoiceCheckbox'),
     countdownModeSelect: document.getElementById('countdownModeSelect'),
+
+    calibrationStatusBadge: document.getElementById('calibrationStatusBadge'),
+    calWizardBox: document.getElementById('calWizardBox'),
+    calWizardTitle: document.getElementById('calWizardTitle'),
+    calWizardStepBadge: document.getElementById('calWizardStepBadge'),
+    calWizardInstruction: document.getElementById('calWizardInstruction'),
+    calProgressFill: document.getElementById('calProgressFill'),
+    calNoiseCeilingVal: document.getElementById('calNoiseCeilingVal'),
+    calShotPeakVal: document.getElementById('calShotPeakVal'),
+    calProfileStatusVal: document.getElementById('calProfileStatusVal'),
+    startCalWizardBtn: document.getElementById('startCalWizardBtn'),
+    resetCalBtn: document.getElementById('resetCalBtn'),
+    signatureFilterCheckbox: document.getElementById('signatureFilterCheckbox'),
+    signatureStrictnessSlider: document.getElementById('signatureStrictnessSlider'),
+    signatureStrictnessVal: document.getElementById('signatureStrictnessVal'),
+    shotDiagnosticBanner: document.getElementById('shotDiagnosticBanner'),
+
     thresholdSlider: document.getElementById('thresholdSlider'),
     thresholdSliderVal: document.getElementById('thresholdSliderVal'),
     debounceSlider: document.getElementById('debounceSlider'),
@@ -476,7 +520,7 @@
       // Explicitly cache all assets offline & show browser install instructions
       if ('caches' in window) {
         try {
-          const cache = await caches.open('airsoft-trainer-v1.9');
+          const cache = await caches.open('airsoft-trainer-v2.0');
           await cache.addAll([
             './',
             './index.html',
@@ -597,6 +641,7 @@
    * In all other phases (Countdown, Live Fire, etc.), the mic is strictly in SHOT CRACK mode.
    */
   function isMicInVoiceMode() {
+    if (state.calWizard && state.calWizard.active) return false;
     return state.phase === 'WAITING_FOR_READY' || state.phase === 'IDLE';
   }
 
@@ -884,33 +929,463 @@
   }
 
   /**
-   * Computes high-frequency acoustic crack energy (3000Hz - 10000Hz)
-   * which is strong in GBB/pistol shots and weak in phone TTS speech.
+   * Computes a 6-band spectral energy profile (0..100 per band) from FFT data:
+   * B0: 60-250Hz (Low rumble / wind / footsteps / thumps)
+   * B1: 250-750Hz (Fundamental voice / vowel warmth)
+   * B2: 750-1800Hz (Mid punch / vocal formants)
+   * B3: 1800-3800Hz (Upper-mid valve pop / mechanical snap)
+   * B4: 3800-7500Hz (High metallic slide / muzzle crack)
+   * B5: 7500-14000Hz (Ultra-high compressed gas impulse)
    */
-  function computeHighFreqCrackEnergy() {
-    if (!state.analyser || !state.freqDomainData || !state.audioCtx) return 0;
+  function computeSixBandSpectrum() {
+    if (!state.analyser || !state.freqDomainData || !state.audioCtx) {
+      return [0, 0, 0, 0, 0, 0];
+    }
     state.analyser.getByteFrequencyData(state.freqDomainData);
 
     const sampleRate = state.audioCtx.sampleRate || 48000;
     const binHz = sampleRate / state.analyser.fftSize;
-    const startBin = Math.max(8, Math.floor(3000 / binHz));
-    const endBin = Math.min(
-      state.freqDomainData.length - 1,
-      Math.ceil(10000 / binHz)
+    const maxBinIdx = state.freqDomainData.length - 1;
+
+    const bandRangesHz = [
+      [60, 250],
+      [250, 750],
+      [750, 1800],
+      [1800, 3800],
+      [3800, 7500],
+      [7500, 14000]
+    ];
+
+    return bandRangesHz.map(([lowHz, highHz]) => {
+      const start = Math.max(1, Math.floor(lowHz / binHz));
+      const end = Math.min(maxBinIdx, Math.ceil(highHz / binHz));
+      if (end < start) return 0;
+      let sum = 0;
+      let peak = 0;
+      let count = 0;
+      for (let i = start; i <= end; i++) {
+        const v = state.freqDomainData[i];
+        sum += v;
+        if (v > peak) peak = v;
+        count++;
+      }
+      const avg = count > 0 ? sum / count : 0;
+      const blended = avg * 0.55 + peak * 0.45;
+      return Math.min(100, Math.round((blended / 215) * 100));
+    });
+  }
+
+  function normalizeSixBandVector(bands) {
+    let magSq = 0;
+    for (let i = 0; i < 6; i++) {
+      magSq += bands[i] * bands[i];
+    }
+    const mag = Math.sqrt(magSq);
+    if (mag < 1e-3) return [0, 0, 0, 0, 0, 0];
+    return bands.map((v) => Number((v / mag).toFixed(4)));
+  }
+
+  /**
+   * Evaluates whether an acoustic spike matches the calibrated shot signature
+   * (or default GBB/pistol crack profile) and rejects background noise / voices / thumps.
+   */
+  function evaluateCandidateShotSpike(rawPeakPercent, rawBands, transientRise) {
+    const cal = state.calibration;
+    const ambient = cal.ambientBands || [4, 4, 3, 2, 2, 1];
+
+    // 1. Subtract calibrated room background noise floor per frequency band
+    const cleanBands = rawBands.map((val, idx) =>
+      Math.max(0, val - (ambient[idx] || 0) * 0.85)
     );
 
-    let maxBin = 0;
-    let sum = 0;
-    let count = 0;
-    for (let i = startBin; i <= endBin; i++) {
-      const val = state.freqDomainData[i];
-      sum += val;
-      if (val > maxBin) maxBin = val;
-      count++;
+    const normVec = normalizeSixBandVector(cleanBands);
+    const targetVec = cal.shotVector || [0.16, 0.22, 0.36, 0.52, 0.55, 0.47];
+
+    // 2. Cosine similarity between spike's 6-band spectrum and pistol template
+    let dot = 0;
+    for (let i = 0; i < 6; i++) {
+      dot += normVec[i] * targetVec[i];
     }
-    if (count === 0) return 0;
-    const avg = sum / count;
-    return Math.min(100, Math.round(((avg * 0.5 + maxBin * 0.5) / 180) * 100));
+    let similarity = Math.max(0, Math.min(1, dot));
+
+    // 3. Check high-frequency crack share (B3+B4+B5 vs B0+B1 low rumble/voice)
+    const totalEnergy = cleanBands.reduce((a, b) => a + b, 0) || 1;
+    const hfEnergy = cleanBands[3] + cleanBands[4] + cleanBands[5];
+    const lfEnergy = cleanBands[0] + cleanBands[1];
+    const spikeHfShare = hfEnergy / totalEnergy;
+    const expectedHfShare = cal.calibrated ? Math.max(0.28, cal.hfShare * 0.65) : 0.35;
+
+    // Penalize low-frequency thumps, wind gusts, or loud vocal shouts that lack high-freq snap
+    if (spikeHfShare < expectedHfShare) {
+      const ratio = Math.max(0.25, spikeHfShare / expectedHfShare);
+      similarity *= ratio;
+    }
+    if (!cal.calibrated && lfEnergy > hfEnergy * 1.65) {
+      similarity *= 0.55;
+    }
+
+    // 4. Penalize non-impulsive sounds (gradual/steady loud background noise)
+    const minRise = cal.calibrated ? 10 : 12;
+    if (transientRise < minRise) {
+      similarity *= 0.5;
+    }
+
+    const matchPercent = Math.min(100, Math.round(similarity * 100));
+    const accepted = !state.useSignatureFilter
+      ? transientRise >= 8
+      : matchPercent >= state.signatureStrictness && transientRise >= minRise;
+
+    updateShotDiagnosticUI(rawPeakPercent, matchPercent, accepted, transientRise);
+    return { accepted, matchPercent };
+  }
+
+  function updateShotDiagnosticUI(peakPercent, matchPercent, accepted, transientRise) {
+    if (!el.shotDiagnosticBanner) return;
+    el.shotDiagnosticBanner.classList.remove('diag-accepted', 'diag-rejected');
+    if (accepted) {
+      el.shotDiagnosticBanner.classList.add('diag-accepted');
+      el.shotDiagnosticBanner.innerHTML = `&#10004; <strong>SHOT ACCEPTED</strong> &mdash; Peak: <strong>${peakPercent}%</strong> (Rise +${transientRise}%) &bull; Signature Match: <strong>${matchPercent}%</strong> (Min ${state.signatureStrictness}%)`;
+    } else {
+      el.shotDiagnosticBanner.classList.add('diag-rejected');
+      el.shotDiagnosticBanner.innerHTML = `&#10006; <strong>REJECTED AS NOISE</strong> &mdash; Peak: <strong>${peakPercent}%</strong> (Rise +${transientRise}%) &bull; Signature Match: <strong>${matchPercent}%</strong> (Needs &ge;${state.signatureStrictness}%)`;
+    }
+  }
+
+  // ==========================================
+  // 8B. 2-STEP GUIDED CALIBRATION WIZARD
+  // ==========================================
+  async function startShotCalibrationWizard() {
+    if (state.calWizard.active) {
+      cancelShotCalibrationWizard('Calibration cancelled.');
+      return;
+    }
+
+    if (state.phase !== 'IDLE') {
+      stopDrill('Stopped drill for mic calibration');
+    }
+
+    if (!state.micEnabled) {
+      const ok = await toggleMicDetector(true);
+      if (!ok) return;
+    }
+
+    state.calWizard.active = true;
+    state.calWizard.step = 'NOISE';
+    state.calWizard.noiseStartMs = performance.now();
+    state.calWizard.noisePeakSamples = [];
+    state.calWizard.noiseBandSamples = [];
+    state.calWizard.recordedShots = [];
+    state.calWizard.pendingCaptureFrames = 0;
+    state.calWizard.lastCalShotMs = 0;
+
+    if (el.calWizardBox) el.calWizardBox.classList.add('cal-active');
+    if (el.startCalWizardBtn) el.startCalWizardBtn.textContent = 'Cancel Calibration';
+    if (el.calWizardStepBadge) el.calWizardStepBadge.textContent = 'Step 1/2: Noise';
+    if (el.calWizardInstruction) {
+      el.calWizardInstruction.innerHTML =
+        '<strong>Step 1/2:</strong> Sampling room background noise for 3 seconds... <em>Do not fire yet!</em>';
+    }
+    if (el.calProgressFill) el.calProgressFill.style.width = '5%';
+    updateHandsFreeQuickBadge();
+  }
+
+  function cancelShotCalibrationWizard(msg = 'Calibration cancelled.') {
+    state.calWizard.active = false;
+    state.calWizard.step = 'IDLE';
+    if (el.calWizardBox) el.calWizardBox.classList.remove('cal-active');
+    if (el.startCalWizardBtn) {
+      el.startCalWizardBtn.textContent = 'Start 2-Step Calibration';
+    }
+    if (el.calWizardStepBadge) el.calWizardStepBadge.textContent = 'Ready';
+    if (el.calWizardInstruction) el.calWizardInstruction.textContent = msg;
+    if (el.calProgressFill) el.calProgressFill.style.width = '0%';
+    updateHandsFreeQuickBadge();
+  }
+
+  function processCalibrationWizardFrame(rawPeakPercent, bands, transientRise, nowMs) {
+    const wiz = state.calWizard;
+    if (!wiz.active) return;
+
+    if (wiz.step === 'NOISE') {
+      const elapsed = nowMs - wiz.noiseStartMs;
+      wiz.noisePeakSamples.push(rawPeakPercent);
+      wiz.noiseBandSamples.push(bands);
+
+      const pct = Math.min(50, Math.round((elapsed / 3000) * 50));
+      if (el.calProgressFill) el.calProgressFill.style.width = `${pct}%`;
+
+      const secLeft = Math.max(0, ((3000 - elapsed) / 1000).toFixed(1));
+      if (el.calWizardInstruction) {
+        el.calWizardInstruction.innerHTML = `<strong>Step 1/2:</strong> Measuring background noise (${secLeft}s remaining)... Keep from shooting.`;
+      }
+
+      if (elapsed >= 3000) {
+        // Compute 95th percentile noise ceiling & average 6-band noise floor
+        const sortedPeaks = [...wiz.noisePeakSamples].sort((a, b) => a - b);
+        const p95Idx = Math.min(
+          sortedPeaks.length - 1,
+          Math.floor(sortedPeaks.length * 0.95)
+        );
+        const noiseCeiling = Math.min(68, Math.max(6, sortedPeaks[p95Idx] || 8));
+
+        const avgAmbientBands = [0, 0, 0, 0, 0, 0];
+        const nSamples = wiz.noiseBandSamples.length || 1;
+        wiz.noiseBandSamples.forEach((b) => {
+          for (let i = 0; i < 6; i++) avgAmbientBands[i] += b[i];
+        });
+        for (let i = 0; i < 6; i++) {
+          avgAmbientBands[i] = Math.round(avgAmbientBands[i] / nSamples);
+        }
+
+        state.calibration.noiseCeiling = noiseCeiling;
+        state.calibration.ambientBands = avgAmbientBands;
+        state.rollingNoiseFloor = noiseCeiling;
+
+        wiz.step = 'SHOTS';
+        wiz.lastCalShotMs = nowMs + 300;
+        playTimerBeep(120, 1800, 0.45);
+
+        if (el.calNoiseCeilingVal) el.calNoiseCeilingVal.textContent = `${noiseCeiling}%`;
+        if (el.calWizardStepBadge) {
+          el.calWizardStepBadge.textContent = 'Step 2/2: Fire 3 Shots (0/3)';
+        }
+        if (el.calWizardInstruction) {
+          el.calWizardInstruction.innerHTML = `<strong>Step 2/2:</strong> Background noise measured (${noiseCeiling}%). Now <strong>fire 3 single shots</strong> with your airsoft pistol (<strong>0 / 3</strong> recorded)...`;
+        }
+      }
+      return;
+    }
+
+    if (wiz.step === 'SHOTS') {
+      // If currently capturing a 3-frame peak window for a detected shot
+      if (wiz.pendingCaptureFrames > 0) {
+        if (rawPeakPercent > wiz.pendingBestPeak) {
+          wiz.pendingBestPeak = rawPeakPercent;
+          wiz.pendingBestBands = bands;
+        }
+        wiz.pendingCaptureFrames--;
+
+        if (wiz.pendingCaptureFrames === 0) {
+          recordCalibratedShotSample(wiz.pendingBestPeak, wiz.pendingBestBands, nowMs);
+        }
+        return;
+      }
+
+      const minCalShotTrigger = Math.min(
+        90,
+        Math.max(24, state.calibration.noiseCeiling + 14)
+      );
+      if (
+        rawPeakPercent >= minCalShotTrigger &&
+        transientRise >= 10 &&
+        nowMs - wiz.lastCalShotMs >= 420
+      ) {
+        wiz.pendingCaptureFrames = 2;
+        wiz.pendingBestPeak = rawPeakPercent;
+        wiz.pendingBestBands = bands;
+      }
+    }
+  }
+
+  function recordCalibratedShotSample(shotPeak, shotBands, nowMs) {
+    const wiz = state.calWizard;
+    wiz.lastCalShotMs = nowMs;
+
+    const ambient = state.calibration.ambientBands || [4, 4, 3, 2, 2, 1];
+    const cleanBands = shotBands.map((val, idx) =>
+      Math.max(0, val - (ambient[idx] || 0) * 0.85)
+    );
+    const normVec = normalizeSixBandVector(cleanBands);
+    const totalEnergy = cleanBands.reduce((a, b) => a + b, 0) || 1;
+    const hfShare = (cleanBands[3] + cleanBands[4] + cleanBands[5]) / totalEnergy;
+
+    wiz.recordedShots.push({
+      peak: shotPeak,
+      normVec,
+      hfShare
+    });
+
+    const count = wiz.recordedShots.length;
+    const pct = 50 + Math.round((count / 3) * 50);
+    if (el.calProgressFill) el.calProgressFill.style.width = `${pct}%`;
+
+    if (count < 3) {
+      if (el.calWizardStepBadge) {
+        el.calWizardStepBadge.textContent = `Step 2/2: Fire 3 Shots (${count}/3)`;
+      }
+      if (el.calWizardInstruction) {
+        el.calWizardInstruction.innerHTML = `Shot #${count} captured (Peak ${shotPeak}%)! Fire <strong>${3 - count} more shot${3 - count === 1 ? '' : 's'}</strong> (${count} / 3)...`;
+      }
+      return;
+    }
+
+    // Finalize 3-shot calibration profile
+    const avgVec = [0, 0, 0, 0, 0, 0];
+    let sumPeak = 0;
+    let minPeak = 100;
+    let sumHf = 0;
+
+    wiz.recordedShots.forEach((s) => {
+      sumPeak += s.peak;
+      if (s.peak < minPeak) minPeak = s.peak;
+      sumHf += s.hfShare;
+      for (let i = 0; i < 6; i++) avgVec[i] += s.normVec[i];
+    });
+
+    const finalShotVec = normalizeSixBandVector(avgVec);
+    const avgShotPeak = Math.round(sumPeak / 3);
+    const avgHfShare = Number((sumHf / 3).toFixed(3));
+    const noiseCeiling = state.calibration.noiseCeiling;
+
+    // Auto-place sensitivity threshold between background noise ceiling and weakest shot
+    const autoThreshold = Math.min(
+      92,
+      Math.max(
+        noiseCeiling + 9,
+        Math.round(noiseCeiling + (minPeak - noiseCeiling) * 0.46)
+      )
+    );
+
+    state.calibration = {
+      calibrated: true,
+      noiseCeiling,
+      avgShotPeak,
+      ambientBands: state.calibration.ambientBands,
+      shotVector: finalShotVec,
+      hfShare: avgHfShare
+    };
+
+    state.thresholdPercent = autoThreshold;
+    state.useSignatureFilter = true;
+    saveCalibrationToStorage();
+    renderCalibrationUI();
+
+    wiz.active = false;
+    wiz.step = 'IDLE';
+    if (el.calWizardBox) el.calWizardBox.classList.remove('cal-active');
+    if (el.startCalWizardBtn) {
+      el.startCalWizardBtn.textContent = 'Recalibrate Mic & Shot Sound';
+    }
+    if (el.calWizardStepBadge) el.calWizardStepBadge.textContent = 'Calibrated ✓';
+    if (el.calWizardInstruction) {
+      el.calWizardInstruction.innerHTML = `<strong>Calibration Complete!</strong> Learned your pistol&rsquo;s sound signature (Avg Peak ${avgShotPeak}%, Noise Ceiling ${noiseCeiling}%, Auto Threshold ${autoThreshold}%). Test firing now!`;
+    }
+    playTimerBeep(160, 2400, 0.5);
+    updateHandsFreeQuickBadge();
+  }
+
+  function saveCalibrationToStorage() {
+    try {
+      const payload = {
+        thresholdPercent: state.thresholdPercent,
+        debounceMs: state.debounceMs,
+        useSignatureFilter: state.useSignatureFilter,
+        signatureStrictness: state.signatureStrictness,
+        calibration: state.calibration
+      };
+      localStorage.setItem(STORAGE_KEYS.CALIBRATION, JSON.stringify(payload));
+    } catch (_) {}
+  }
+
+  function loadCalibrationFromStorage() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.CALIBRATION);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.thresholdPercent === 'number') {
+          state.thresholdPercent = parsed.thresholdPercent;
+        }
+        if (typeof parsed.debounceMs === 'number') {
+          state.debounceMs = parsed.debounceMs;
+        }
+        if (typeof parsed.useSignatureFilter === 'boolean') {
+          state.useSignatureFilter = parsed.useSignatureFilter;
+        }
+        if (typeof parsed.signatureStrictness === 'number') {
+          state.signatureStrictness = parsed.signatureStrictness;
+        }
+        if (parsed.calibration && Array.isArray(parsed.calibration.shotVector)) {
+          state.calibration = parsed.calibration;
+        }
+      }
+    } catch (_) {}
+    renderCalibrationUI();
+  }
+
+  function resetCalibrationProfile() {
+    state.calibration = {
+      calibrated: false,
+      noiseCeiling: 12,
+      avgShotPeak: 78,
+      ambientBands: [4, 4, 3, 2, 2, 1],
+      shotVector: [0.16, 0.22, 0.36, 0.52, 0.55, 0.47],
+      hfShare: 0.65
+    };
+    state.thresholdPercent = 62;
+    state.signatureStrictness = 72;
+    state.useSignatureFilter = true;
+    localStorage.removeItem(STORAGE_KEYS.CALIBRATION);
+    renderCalibrationUI();
+    if (el.calWizardInstruction) {
+      el.calWizardInstruction.textContent =
+        'Profile reset to default GBB/CO2 settings. Tap Start 2-Step Calibration to train on your environment and pistol.';
+    }
+    if (el.calProgressFill) el.calProgressFill.style.width = '0%';
+    if (el.calWizardStepBadge) el.calWizardStepBadge.textContent = 'Ready';
+  }
+
+  function renderCalibrationUI() {
+    const cal = state.calibration;
+    if (el.thresholdSlider) el.thresholdSlider.value = state.thresholdPercent;
+    if (el.thresholdSliderVal) {
+      el.thresholdSliderVal.textContent = `${state.thresholdPercent}%`;
+    }
+    if (state.phase !== 'WAITING_FOR_READY' && el.meterThresholdLine) {
+      el.meterThresholdLine.style.left = `${state.thresholdPercent}%`;
+    }
+    if (el.debounceSlider) el.debounceSlider.value = state.debounceMs;
+    if (el.debounceSliderVal) {
+      el.debounceSliderVal.textContent = `${state.debounceMs} ms`;
+    }
+    if (el.signatureFilterCheckbox) {
+      el.signatureFilterCheckbox.checked = state.useSignatureFilter;
+    }
+    if (el.signatureStrictnessSlider) {
+      el.signatureStrictnessSlider.value = state.signatureStrictness;
+    }
+    if (el.signatureStrictnessVal) {
+      el.signatureStrictnessVal.textContent = `${state.signatureStrictness}%`;
+    }
+
+    if (cal.calibrated) {
+      if (el.calibrationStatusBadge) {
+        el.calibrationStatusBadge.textContent = 'Calibrated Pistol Profile';
+      }
+      if (el.calNoiseCeilingVal) {
+        el.calNoiseCeilingVal.textContent = `${cal.noiseCeiling}%`;
+      }
+      if (el.calShotPeakVal) {
+        el.calShotPeakVal.textContent = `${cal.avgShotPeak}%`;
+      }
+      if (el.calProfileStatusVal) {
+        el.calProfileStatusVal.textContent = 'Custom 6-Band Pistol Match';
+      }
+      if (el.startCalWizardBtn && !state.calWizard.active) {
+        el.startCalWizardBtn.textContent = 'Recalibrate Mic & Shot Sound';
+      }
+    } else {
+      if (el.calibrationStatusBadge) {
+        el.calibrationStatusBadge.textContent = 'Default Profile';
+      }
+      if (el.calNoiseCeilingVal) el.calNoiseCeilingVal.textContent = '--';
+      if (el.calShotPeakVal) el.calShotPeakVal.textContent = '--';
+      if (el.calProfileStatusVal) {
+        el.calProfileStatusVal.textContent = 'Default GBB Filter';
+      }
+      if (el.startCalWizardBtn && !state.calWizard.active) {
+        el.startCalWizardBtn.textContent = 'Start 2-Step Calibration';
+      }
+    }
   }
 
   function runMicLoop() {
@@ -928,6 +1403,16 @@
       if (dev > maxDeviation) maxDeviation = dev;
     }
     const rawPeakPercent = Math.min(100, Math.round((maxDeviation / 128) * 100));
+    const transientRise = Math.max(
+      0,
+      Math.round(rawPeakPercent - state.rollingNoiseFloor)
+    );
+
+    // Update rolling background noise floor on non-spike frames
+    if (rawPeakPercent < state.thresholdPercent) {
+      state.rollingNoiseFloor =
+        state.rollingNoiseFloor * 0.92 + rawPeakPercent * 0.08;
+    }
 
     if (voiceMode) {
       // ====================================================
@@ -955,6 +1440,18 @@
       el.meterThresholdLine.style.left = `${Math.min(98, displayedThreshold)}%`;
       el.peakValueLabel.textContent = `${vocalPercent}%`;
 
+      // Allow live testing of shot signature on Settings screen while IDLE
+      if (
+        state.phase === 'IDLE' &&
+        !voiceBusy &&
+        rawPeakPercent >= state.thresholdPercent &&
+        nowMs - state.lastShotTimestampMs >= state.debounceMs
+      ) {
+        state.lastShotTimestampMs = nowMs;
+        const bands = computeSixBandSpectrum();
+        evaluateCandidateShotSpike(rawPeakPercent, bands, transientRise);
+      }
+
       if (
         state.phase === 'WAITING_FOR_READY' &&
         !voiceBusy &&
@@ -965,8 +1462,8 @@
       }
     } else {
       // ====================================================
-      // MODE B: SHOT CRACK MODE (COUNTDOWN & LIVE FIRE)
-      // Strictly listens ONLY for the crack of a shot, while ignoring app audio!
+      // MODE B: SHOT CRACK & CALIBRATION MODE
+      // Strictly listens ONLY for calibrated shot signature, ignoring app audio & noise!
       // ====================================================
       if (state.phase !== 'LIVE') {
         const synthSpeaking =
@@ -995,13 +1492,29 @@
       el.meterThresholdLine.style.left = `${Math.min(98, state.thresholdPercent)}%`;
       el.peakValueLabel.textContent = `${shotCrackPercent}%`;
 
-      if (
+      if (!shotMuted && state.calWizard.active) {
+        const bands = computeSixBandSpectrum();
+        processCalibrationWizardFrame(
+          shotCrackPercent,
+          bands,
+          transientRise,
+          nowMs
+        );
+      } else if (
         !shotMuted &&
         shotCrackPercent >= state.thresholdPercent &&
         nowMs - state.lastShotTimestampMs >= state.debounceMs
       ) {
-        state.lastShotTimestampMs = nowMs;
-        handleAcousticSpikeDetected(nowMs);
+        const bands = computeSixBandSpectrum();
+        const { accepted } = evaluateCandidateShotSpike(
+          shotCrackPercent,
+          bands,
+          transientRise
+        );
+        if (accepted) {
+          state.lastShotTimestampMs = nowMs;
+          handleAcousticSpikeDetected(nowMs);
+        }
       }
     }
 
@@ -2383,6 +2896,29 @@
     });
 
     // Settings & Audio Controls
+    if (el.startCalWizardBtn) {
+      el.startCalWizardBtn.addEventListener('click', startShotCalibrationWizard);
+    }
+    if (el.resetCalBtn) {
+      el.resetCalBtn.addEventListener('click', resetCalibrationProfile);
+    }
+    if (el.signatureFilterCheckbox) {
+      el.signatureFilterCheckbox.addEventListener('change', () => {
+        state.useSignatureFilter = el.signatureFilterCheckbox.checked;
+        saveCalibrationToStorage();
+      });
+    }
+    if (el.signatureStrictnessSlider) {
+      el.signatureStrictnessSlider.addEventListener('input', () => {
+        const val = parseInt(el.signatureStrictnessSlider.value, 10);
+        state.signatureStrictness = val;
+        if (el.signatureStrictnessVal) {
+          el.signatureStrictnessVal.textContent = `${val}%`;
+        }
+        saveCalibrationToStorage();
+      });
+    }
+
     el.thresholdSlider.addEventListener('input', () => {
       const val = parseInt(el.thresholdSlider.value, 10);
       state.thresholdPercent = val;
@@ -2390,6 +2926,7 @@
       if (state.phase !== 'WAITING_FOR_READY') {
         el.meterThresholdLine.style.left = `${val}%`;
       }
+      saveCalibrationToStorage();
     });
 
     el.voiceThresholdSlider.addEventListener('input', () => {
@@ -2405,6 +2942,7 @@
       const val = parseInt(el.debounceSlider.value, 10);
       state.debounceMs = val;
       el.debounceSliderVal.textContent = `${val} ms`;
+      saveCalibrationToStorage();
     });
 
     el.calibrateMicBtn.addEventListener('click', () => toggleMicDetector());
@@ -2448,6 +2986,7 @@
   // ==========================================
   function init() {
     bindEvents();
+    loadCalibrationFromStorage();
     selectBuilderDrillTile('draw_exact');
     loadQueueFromStorage();
     loadLogsFromStorage();
