@@ -480,7 +480,7 @@
       // Explicitly cache all assets offline & show browser install instructions
       if ('caches' in window) {
         try {
-          const cache = await caches.open('airsoft-trainer-v1.6');
+          const cache = await caches.open('airsoft-trainer-v1.7');
           await cache.addAll([
             './',
             './index.html',
@@ -580,7 +580,9 @@
   );
 
   // ==========================================
-  // 8. WEB AUDIO API: PIEZO, TTS, GBB TRANSIENT & VOCAL FORMANT DETECTOR
+  // 8. WEB AUDIO API: TWO-MODE MIC ENGINE
+  //    - VOICE MODE: Only when WAITING_FOR_READY or IDLE (Start/Go)
+  //    - SHOT CRACK MODE: During Countdown & Live Fire (Never muted by TTS!)
   // ==========================================
   function ensureAudioContext() {
     if (!state.audioCtx) {
@@ -593,33 +595,44 @@
     return state.audioCtx;
   }
 
-  function isSelfAudioActive(nowMs = performance.now()) {
+  /**
+   * Returns true ONLY when the microphone should be in VOICE mode:
+   * - Waiting for shooter to say "Ready" (WAITING_FOR_READY)
+   * - Or drill not started (IDLE), listening for "Start" / "Go"
+   * In all other phases (Countdown, Live Fire, etc.), the mic is strictly in SHOT CRACK mode.
+   */
+  function isMicInVoiceMode() {
+    return state.phase === 'WAITING_FOR_READY' || state.phase === 'IDLE';
+  }
+
+  /**
+   * Used ONLY in VOICE mode so the voice listener never triggers on the app's own TTS prompt.
+   * NEVER used to mute the Shot Crack detector during Countdown or Fire!
+   */
+  function isVoiceSelfAudioBusy(nowMs = performance.now()) {
     const synthSpeaking =
       state.isSpeakingTts ||
       ('speechSynthesis' in window && window.speechSynthesis.speaking);
     if (synthSpeaking) {
-      state.muteShotDetectionUntilMs = Math.max(
-        state.muteShotDetectionUntilMs,
-        nowMs + 280
-      );
-      state.ignoreVoiceUntilMs = Math.max(state.ignoreVoiceUntilMs, nowMs + 500);
+      state.ignoreVoiceUntilMs = Math.max(state.ignoreVoiceUntilMs, nowMs + 420);
       return true;
     }
-    return nowMs < state.muteShotDetectionUntilMs;
+    return nowMs < state.ignoreVoiceUntilMs;
   }
 
-  function playTimerBeep(durationMs = 220, freqHz = null, gainLevel = 0.65) {
+  function playTimerBeep(durationMs = 180, freqHz = null, gainLevel = 0.65) {
     const ctx = ensureAudioContext();
     const frequency = freqHz || Number(el.beepFreqSelect.value) || 2400;
 
     const nowMs = performance.now();
+    // Only mute shot detector during the brief hardware piezo tone itself
     state.muteShotDetectionUntilMs = Math.max(
       state.muteShotDetectionUntilMs,
-      nowMs + durationMs + 140
+      nowMs + durationMs + 50
     );
     state.ignoreVoiceUntilMs = Math.max(
       state.ignoreVoiceUntilMs,
-      nowMs + durationMs + 380
+      nowMs + durationMs + 350
     );
 
     const osc = ctx.createOscillator();
@@ -629,8 +642,8 @@
     osc.frequency.setValueAtTime(frequency, ctx.currentTime);
 
     gain.gain.setValueAtTime(0.001, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(gainLevel, ctx.currentTime + 0.01);
-    gain.gain.setValueAtTime(gainLevel, ctx.currentTime + durationMs / 1000 - 0.015);
+    gain.gain.exponentialRampToValueAtTime(gainLevel, ctx.currentTime + 0.008);
+    gain.gain.setValueAtTime(gainLevel, ctx.currentTime + durationMs / 1000 - 0.012);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + durationMs / 1000);
 
     osc.connect(gain);
@@ -641,8 +654,9 @@
   }
 
   /**
-   * Speaks a tactical phrase or single countdown word.
-   * Supports custom speech rate and post-speech guard duration.
+   * Speaks a tactical phrase or countdown number.
+   * IMPORTANT: Does NOT mute the Shot Crack detector (muteShotDetectionUntilMs is untouched),
+   * so shots fired during a countdown or right on "Fire!" are always registered!
    */
   function speakCue(
     text,
@@ -650,14 +664,14 @@
       onEnd = null,
       playBeepAfter = false,
       rateOverride = null,
-      postGuardMs = 400
+      postGuardMs = 350
     } = {}
   ) {
     suspendSpeechRecognitionForSelfAudio();
 
     if (!('speechSynthesis' in window)) {
-      if (playBeepAfter) playTimerBeep(240);
-      if (onEnd) setTimeout(onEnd, 260);
+      if (playBeepAfter) playTimerBeep(180);
+      if (onEnd) setTimeout(onEnd, 220);
       return;
     }
 
@@ -668,16 +682,12 @@
     utter.pitch = 0.96;
     utter.volume = 1.0;
 
-    const estimatedMs = Math.max(320, text.length * 68);
+    const estimatedMs = Math.max(260, text.length * 65);
     const nowMs = performance.now();
     state.isSpeakingTts = true;
-    state.muteShotDetectionUntilMs = Math.max(
-      state.muteShotDetectionUntilMs,
-      nowMs + estimatedMs + postGuardMs
-    );
     state.ignoreVoiceUntilMs = Math.max(
       state.ignoreVoiceUntilMs,
-      nowMs + estimatedMs + postGuardMs + 200
+      nowMs + estimatedMs + postGuardMs
     );
 
     let finished = false;
@@ -687,15 +697,14 @@
       state.isSpeakingTts = false;
 
       const endNow = performance.now();
-      state.muteShotDetectionUntilMs = endNow + postGuardMs;
-      state.ignoreVoiceUntilMs = endNow + postGuardMs + 150;
+      state.ignoreVoiceUntilMs = endNow + postGuardMs;
 
       if (playBeepAfter) {
-        playTimerBeep(240);
+        playTimerBeep(180);
       }
 
-      if (state.phase === 'WAITING_FOR_READY' || state.phase === 'ASKING_READY') {
-        resumeSpeechRecognitionAfterSelfAudio(postGuardMs + 50);
+      if (isMicInVoiceMode()) {
+        resumeSpeechRecognitionAfterSelfAudio(postGuardMs + 40);
       }
 
       if (onEnd) onEnd();
@@ -708,30 +717,31 @@
       if (!window.speechSynthesis.speaking) {
         finishHandler();
       } else {
-        setTimeout(finishHandler, 900);
+        setTimeout(finishHandler, 700);
       }
-    }, estimatedMs + 950);
+    }, estimatedMs + 800);
 
     state.timers.push(safetyWatchdog);
     window.speechSynthesis.speak(utter);
   }
 
   /**
-   * Fires the primary "GO / FIRE" signal. Uses a short postGuardMs (160ms)
-   * so shots fired right after "Fire!" are never blocked by a long TTS cooldown.
+   * Fires the primary "GO / FIRE" signal.
+   * Starts the shot timer clock BEFORE speaking "Fire!" and never mutes the shot detector for TTS,
+   * so fast shots right on "Fire!" are captured 100% of the time.
    */
   function triggerGoSignal(customVoiceText = 'Fire!', callbackOnSignalStart = null) {
     const style = el.signalStyleSelect.value;
+    if (callbackOnSignalStart) callbackOnSignalStart();
+
     if (style === 'beep') {
-      playTimerBeep(240);
-      if (callbackOnSignalStart) callbackOnSignalStart();
+      playTimerBeep(160);
     } else if (style === 'voice') {
-      if (callbackOnSignalStart) callbackOnSignalStart();
-      speakCue(customVoiceText, { rateOverride: 1.25, postGuardMs: 140 });
+      speakCue(customVoiceText, { rateOverride: 1.3, postGuardMs: 100 });
     } else {
-      playTimerBeep(220);
-      if (callbackOnSignalStart) callbackOnSignalStart();
-      speakCue(customVoiceText, { rateOverride: 1.25, postGuardMs: 140 });
+      // 'both': speak "Fire!" immediately without a long piezo mute so 1st shot is never blocked
+      playTimerBeep(90);
+      speakCue(customVoiceText, { rateOverride: 1.3, postGuardMs: 100 });
     }
   }
 
@@ -827,11 +837,41 @@
     return Math.min(100, Math.round((blended / 190) * 100));
   }
 
+  /**
+   * Computes high-frequency acoustic crack energy (3000Hz - 10000Hz)
+   * which is strong in GBB/pistol shots and weak in phone TTS speech.
+   */
+  function computeHighFreqCrackEnergy() {
+    if (!state.analyser || !state.freqDomainData || !state.audioCtx) return 0;
+    state.analyser.getByteFrequencyData(state.freqDomainData);
+
+    const sampleRate = state.audioCtx.sampleRate || 48000;
+    const binHz = sampleRate / state.analyser.fftSize;
+    const startBin = Math.max(8, Math.floor(3000 / binHz));
+    const endBin = Math.min(
+      state.freqDomainData.length - 1,
+      Math.ceil(10000 / binHz)
+    );
+
+    let maxBin = 0;
+    let sum = 0;
+    let count = 0;
+    for (let i = startBin; i <= endBin; i++) {
+      const val = state.freqDomainData[i];
+      sum += val;
+      if (val > maxBin) maxBin = val;
+      count++;
+    }
+    if (count === 0) return 0;
+    const avg = sum / count;
+    return Math.min(100, Math.round(((avg * 0.5 + maxBin * 0.5) / 180) * 100));
+  }
+
   function runMicLoop() {
     if (!state.micEnabled || !state.analyser) return;
 
     const nowMs = performance.now();
-    const selfAudioBusy = isSelfAudioActive(nowMs);
+    const voiceMode = isMicInVoiceMode(); // true ONLY in WAITING_FOR_READY or IDLE
 
     // 1. Compute Time-Domain Peak (for sharp GBB gunshot transients)
     state.analyser.getByteTimeDomainData(state.timeDomainData);
@@ -843,67 +883,95 @@
     }
     const rawPeakPercent = Math.min(100, Math.round((maxDeviation / 128) * 100));
 
-    // 2. Compute Vocal Formant Band Energy (for spoken "Ready" detection)
-    const rawVocalPercent = computeVocalBandEnergyPercent();
+    if (voiceMode) {
+      // ====================================================
+      // MODE A: VOICE MODE (WAITING_FOR_READY or IDLE)
+      // ====================================================
+      const voiceBusy = isVoiceSelfAudioBusy(nowMs);
+      const rawVocalPercent = computeVocalBandEnergyPercent();
+      const vocalPercent = voiceBusy ? 0 : rawVocalPercent;
 
-    const peakPercent = selfAudioBusy ? 0 : rawPeakPercent;
-    const vocalPercent = selfAudioBusy ? 0 : rawVocalPercent;
+      state.currentPeak = 0;
+      state.currentVocalEnergy = vocalPercent;
 
-    state.currentPeak = peakPercent;
-    state.currentVocalEnergy = vocalPercent;
+      const displayedThreshold =
+        state.phase === 'WAITING_FOR_READY'
+          ? Math.max(state.voiceThresholdPercent, state.ambientVoiceFloor + 7)
+          : state.voiceThresholdPercent;
 
-    // When waiting for "Ready", display the Vocal Energy on the top meter so the shooter sees their voice!
-    const isWaitingReady = state.phase === 'WAITING_FOR_READY';
-    const displayedMeterVal = isWaitingReady
-      ? Math.max(vocalPercent, peakPercent)
-      : peakPercent;
-    const displayedThreshold = isWaitingReady
-      ? Math.max(state.voiceThresholdPercent, state.ambientVoiceFloor + 7)
-      : state.thresholdPercent;
+      if (vocalPercent >= state.peakHold || nowMs > state.peakHoldDecayTime) {
+        state.peakHold = vocalPercent;
+        state.peakHoldDecayTime = nowMs + 900;
+      }
 
-    if (displayedMeterVal >= state.peakHold || nowMs > state.peakHoldDecayTime) {
-      state.peakHold = displayedMeterVal;
-      state.peakHoldDecayTime = nowMs + 900;
-    }
+      el.meterFill.style.width = `${vocalPercent}%`;
+      el.meterPeakHold.style.left = `${Math.min(99, state.peakHold)}%`;
+      el.meterThresholdLine.style.left = `${Math.min(98, displayedThreshold)}%`;
+      el.peakValueLabel.textContent = `${vocalPercent}%`;
 
-    el.meterFill.style.width = `${displayedMeterVal}%`;
-    el.meterPeakHold.style.left = `${Math.min(99, state.peakHold)}%`;
-    el.meterThresholdLine.style.left = `${Math.min(98, displayedThreshold)}%`;
-    el.peakValueLabel.textContent = `${displayedMeterVal}%`;
+      if (
+        state.phase === 'WAITING_FOR_READY' &&
+        !voiceBusy &&
+        nowMs >= state.readyListenEligibleAtMs &&
+        el.enableAcousticReadyFallbackCheckbox.checked
+      ) {
+        processVocalReadyEnvelope(vocalPercent, nowMs);
+      }
+    } else {
+      // ====================================================
+      // MODE B: SHOT CRACK MODE (COUNTDOWN & LIVE FIRE)
+      // Strictly listens ONLY for the crack of a shot!
+      // NEVER muted by spoken TTS ("Draw!", "3, 2, 1", "Fire!")
+      // ====================================================
+      const piezoBusy = nowMs < state.muteShotDetectionUntilMs;
+      const hfCrack = computeHighFreqCrackEnergy();
+      const synthSpeaking =
+        state.isSpeakingTts ||
+        ('speechSynthesis' in window && window.speechSynthesis.speaking);
 
-    // 3. If in WAITING_FOR_READY phase, run Vocal Formant Envelope Detector for "Ready"
-    if (
-      isWaitingReady &&
-      !selfAudioBusy &&
-      nowMs >= state.readyListenEligibleAtMs &&
-      el.enableAcousticReadyFallbackCheckbox.checked
-    ) {
-      processVocalReadyEnvelope(displayedMeterVal, nowMs);
-    }
+      // If TTS is speaking, require either high-frequency shot crack energy (>=12%) or strong transient spike
+      // so the phone speaker talking doesn't false-trigger, while a real GBB shot crack passes right through!
+      let shotCrackPercent = 0;
+      if (!piezoBusy) {
+        if (!synthSpeaking) {
+          shotCrackPercent = rawPeakPercent;
+        } else if (hfCrack >= 12 || rawPeakPercent >= state.thresholdPercent) {
+          shotCrackPercent = rawPeakPercent;
+        } else {
+          shotCrackPercent = Math.round(rawPeakPercent * 0.35);
+        }
+      }
 
-    // 4. Check GBB Shot Threshold during LIVE / WALKING / DRAWN_WAITING
-    if (
-      !isWaitingReady &&
-      !selfAudioBusy &&
-      peakPercent >= state.thresholdPercent &&
-      nowMs - state.lastShotTimestampMs >= state.debounceMs
-    ) {
-      state.lastShotTimestampMs = nowMs;
-      handleAcousticSpikeDetected(nowMs);
+      state.currentPeak = shotCrackPercent;
+
+      if (shotCrackPercent >= state.peakHold || nowMs > state.peakHoldDecayTime) {
+        state.peakHold = shotCrackPercent;
+        state.peakHoldDecayTime = nowMs + 900;
+      }
+
+      el.meterFill.style.width = `${shotCrackPercent}%`;
+      el.meterPeakHold.style.left = `${Math.min(99, state.peakHold)}%`;
+      el.meterThresholdLine.style.left = `${Math.min(98, state.thresholdPercent)}%`;
+      el.peakValueLabel.textContent = `${shotCrackPercent}%`;
+
+      if (
+        !piezoBusy &&
+        shotCrackPercent >= state.thresholdPercent &&
+        nowMs - state.lastShotTimestampMs >= state.debounceMs
+      ) {
+        state.lastShotTimestampMs = nowMs;
+        handleAcousticSpikeDetected(nowMs);
+      }
     }
 
     state.micRafId = requestAnimationFrame(runMicLoop);
   }
 
   /**
-   * Detects when the shooter speaks "Ready" after "Shooter ready?" has finished:
-   * Step 1: Requires 8 quiet frames (~130ms) after the TTS echo guard to lock in room silence floor.
-   * Step 2: Detects a vocal energy rise >= effectiveThreshold lasting >= 3 frames (~50ms)
-   *         followed by word completion (or 14 continuous vocal frames ~230ms).
+   * Detects when the shooter speaks "Ready" after "Shooter ready?" has finished
    */
   function processVocalReadyEnvelope(vocalLevel, nowMs) {
     if (!state.readyListenerArmed) {
-      // Wait for room silence after "Shooter ready?" finishes playing
       if (vocalLevel < 28) {
         state.quietCalibrationSamples.push(vocalLevel);
         if (state.quietCalibrationSamples.length >= 8) {
@@ -919,7 +987,6 @@
             'Listening for "READY"... (Speak "Ready" now)';
         }
       } else {
-        // Still hearing speaker tail or background noise; reset quiet calibration
         state.quietCalibrationSamples = [];
       }
       return;
@@ -936,12 +1003,10 @@
       if (state.vocalActiveFrames >= 2) {
         el.voiceHeardBanner.innerHTML = `Hearing voice reply (${vocalLevel}%)...`;
       }
-      // If user has spoken clearly for ~220ms continuously, trigger immediately!
       if (state.vocalActiveFrames >= 13) {
         confirmShooterReady('Voice "Ready" Detected');
       }
     } else if (state.vocalActiveFrames >= 3) {
-      // User spoke >= 50ms and vocal level just dropped at end of word "Ready"
       state.vocalQuietTailFrames++;
       if (state.vocalQuietTailFrames >= 3) {
         confirmShooterReady('Voice "Ready" Detected');
@@ -955,6 +1020,19 @@
   function handleAcousticSpikeDetected(nowMs) {
     if (state.phase === 'LIVE') {
       registerShot(nowMs, 'MIC');
+    } else if (state.phase === 'COUNTDOWN') {
+      // If a shot crack occurs during the countdown (or right as "Fire!" is being announced),
+      // transition into LIVE if needed and register the 1st shot immediately so it is never lost!
+      if (!state.signalTimestampMs) {
+        state.signalTimestampMs = nowMs - 10;
+      }
+      const cfg = state.activeRunConfig;
+      setDrillPhaseUI(
+        'LIVE',
+        cfg ? `REP ${cfg.repNumber}/${cfg.totalReps} • LIVE FIRE!` : 'LIVE FIRE!'
+      );
+      startClockAnimationLoop();
+      registerShot(nowMs, 'MIC');
     } else if (state.phase === 'WALKING' || state.phase === 'DRAWN_WAITING') {
       state.prematureShots++;
       el.activeCueBanner.textContent = `EARLY SHOT DETECTED! Wait for 2nd "Fire!" signal!`;
@@ -962,7 +1040,7 @@
   }
 
   // ==========================================
-  // 9. BROWSER SPEECH RECOGNITION (SUPPLEMENTARY)
+  // 9. BROWSER SPEECH RECOGNITION (ONLY IN VOICE MODE)
   // ==========================================
   function initSpeechRecognition() {
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -983,10 +1061,11 @@
     };
 
     rec.onresult = (event) => {
+      // Strictly ignore voice recognition when NOT in Voice Mode (i.e. during Countdown or Live Fire)
+      if (!isMicInVoiceMode()) return;
+
       const nowMs = performance.now();
-      if (isSelfAudioActive(nowMs) || nowMs < state.ignoreVoiceUntilMs) {
-        return;
-      }
+      if (isVoiceSelfAudioBusy(nowMs)) return;
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const transcript = event.results[i][0].transcript.trim().toLowerCase();
@@ -1001,6 +1080,9 @@
     rec.onend = () => {
       state.recognitionRunning = false;
       updateHandsFreeQuickBadge();
+      if (isMicInVoiceMode() && !isVoiceSelfAudioBusy()) {
+        resumeSpeechRecognitionAfterSelfAudio(250);
+      }
     };
 
     state.recognition = rec;
@@ -1019,16 +1101,17 @@
     }
   }
 
-  function resumeSpeechRecognitionAfterSelfAudio(delayMs = 450) {
+  function resumeSpeechRecognitionAfterSelfAudio(delayMs = 400) {
     if (!state.speechRecSupported || !state.recognition) return;
     if (!el.enableSpeechRecCheckbox.checked) return;
+    if (!isMicInVoiceMode()) return;
 
     if (state.recognitionResumeTimer) {
       clearTimeout(state.recognitionResumeTimer);
     }
 
     state.recognitionResumeTimer = setTimeout(() => {
-      if (isSelfAudioActive()) return;
+      if (!isMicInVoiceMode() || isVoiceSelfAudioBusy()) return;
       if (!state.recognitionRunning) {
         try {
           state.recognition.start();
@@ -1039,16 +1122,17 @@
 
   function updateHandsFreeQuickBadge() {
     if (state.phase === 'WAITING_FOR_READY') {
-      el.voiceQuickBadge.textContent = 'Listening: "Ready"';
-    } else if (state.micEnabled) {
-      el.voiceQuickBadge.textContent = 'Voice + Shot Ready';
+      el.voiceQuickBadge.textContent = 'Mic: VOICE (Ready)';
+    } else if (state.phase === 'IDLE') {
+      el.voiceQuickBadge.textContent = 'Mic: VOICE (Start/Go)';
     } else {
-      el.voiceQuickBadge.textContent = 'Say "Ready"';
+      el.voiceQuickBadge.textContent = 'Mic: SHOT CRACK';
     }
   }
 
   let lastVoiceCommandTime = 0;
   function processVoiceCommand(phrase, nowMs = performance.now()) {
+    if (!isMicInVoiceMode()) return;
     if (nowMs - lastVoiceCommandTime < 800) return;
 
     if (phrase === 'shooter' || phrase.includes('shooter ready')) {
@@ -1056,17 +1140,6 @@
     }
 
     el.voiceHeardBanner.innerHTML = `Heard: <strong>"${phrase}"</strong>`;
-
-    if (
-      phrase.includes('stop') ||
-      phrase.includes('cease') ||
-      phrase.includes('cancel') ||
-      phrase.includes('hold')
-    ) {
-      lastVoiceCommandTime = nowMs;
-      stopDrill('Stopped by voice command');
-      return;
-    }
 
     if (state.phase === 'WAITING_FOR_READY' && state.readyListenerArmed) {
       const isReadyWord =
@@ -1085,6 +1158,15 @@
       if (isReadyWord) {
         lastVoiceCommandTime = nowMs;
         confirmShooterReady(`Speech "${phrase}"`);
+      }
+      return;
+    }
+
+    // When drill is NOT started (IDLE): listen for "start" / "go" command
+    if (state.phase === 'IDLE') {
+      if (phrase.includes('start') || phrase.includes('go')) {
+        lastVoiceCommandTime = nowMs;
+        startActiveQueuedDrill();
       }
     }
   }
@@ -1476,7 +1558,6 @@
         const nowMs = performance.now();
         state.readyListenEligibleAtMs = nowMs + 380;
         state.ignoreVoiceUntilMs = nowMs + 380;
-        state.muteShotDetectionUntilMs = nowMs + 380;
 
         setDrillPhaseUI(
           'WAITING_FOR_READY',
@@ -1898,6 +1979,13 @@
     } else if (phase === 'LIVE') {
       el.timerCard.classList.add('phase-live');
     }
+
+    if (!isMicInVoiceMode()) {
+      suspendSpeechRecognitionForSelfAudio();
+    } else if (phase === 'IDLE') {
+      resumeSpeechRecognitionAfterSelfAudio(300);
+    }
+    updateHandsFreeQuickBadge();
   }
 
   // ==========================================
