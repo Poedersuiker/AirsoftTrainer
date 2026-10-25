@@ -160,7 +160,6 @@
     drawerLinks: document.querySelectorAll('.drawer-link'),
     viewPanels: document.querySelectorAll('.view-panel'),
     offlineStatusText: document.getElementById('offlineStatusText'),
-    installPwaBtn: document.getElementById('installPwaBtn'),
     drawerInstallBtn: document.getElementById('drawerInstallBtn'),
     installHelpNote: document.getElementById('installHelpNote'),
 
@@ -446,7 +445,6 @@
       window.navigator.standalone === true;
 
     if (isStandalone) {
-      el.installPwaBtn.classList.add('hidden');
       if (el.drawerInstallBtn) {
         el.drawerInstallBtn.textContent = 'App Installed (Offline Ready)';
       }
@@ -455,7 +453,6 @@
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
       deferredInstallPrompt = e;
-      el.installPwaBtn.classList.remove('hidden');
       if (el.drawerInstallBtn) {
         el.drawerInstallBtn.textContent = '+ Install App Now';
       }
@@ -463,7 +460,6 @@
 
     window.addEventListener('appinstalled', () => {
       deferredInstallPrompt = null;
-      el.installPwaBtn.classList.add('hidden');
       if (el.drawerInstallBtn) {
         el.drawerInstallBtn.textContent = 'App Installed (Offline Ready)';
       }
@@ -480,7 +476,7 @@
       // Explicitly cache all assets offline & show browser install instructions
       if ('caches' in window) {
         try {
-          const cache = await caches.open('airsoft-trainer-v1.7');
+          const cache = await caches.open('airsoft-trainer-v1.8');
           await cache.addAll([
             './',
             './index.html',
@@ -502,7 +498,6 @@
       }
     };
 
-    el.installPwaBtn.addEventListener('click', handleInstallClick);
     if (el.drawerInstallBtn) {
       el.drawerInstallBtn.addEventListener('click', handleInstallClick);
     }
