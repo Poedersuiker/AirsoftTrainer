@@ -204,6 +204,31 @@
     queueCountNavBadge: document.getElementById('queueCountNavBadge'),
     logCountBadge: document.getElementById('logCountBadge'),
 
+    // Full-Window Color-Coded Drill Stage Overlay
+    drillStageOverlay: document.getElementById('drillStageOverlay'),
+    stageExitBtn: document.getElementById('stageExitBtn'),
+    stageBlueView: document.getElementById('stageBlueView'),
+    stageMicLabel: document.getElementById('stageMicLabel'),
+    stageMicPercent: document.getElementById('stageMicPercent'),
+    stageMicFill: document.getElementById('stageMicFill'),
+    stageMicThreshold: document.getElementById('stageMicThreshold'),
+    stageReadyBtn: document.getElementById('stageReadyBtn'),
+    stageOrangeView: document.getElementById('stageOrangeView'),
+    stageCountdownLabel: document.getElementById('stageCountdownLabel'),
+    stageCountdownMain: document.getElementById('stageCountdownMain'),
+    stageCountdownClock: document.getElementById('stageCountdownClock'),
+    stageRedView: document.getElementById('stageRedView'),
+    stageRedShotsCounter: document.getElementById('stageRedShotsCounter'),
+    stageRedSubLabel: document.getElementById('stageRedSubLabel'),
+    stageRedSplitsList: document.getElementById('stageRedSplitsList'),
+    stageGreenView: document.getElementById('stageGreenView'),
+    stageGreenTotalTime: document.getElementById('stageGreenTotalTime'),
+    stageGreenMetrics: document.getElementById('stageGreenMetrics'),
+    stageGreenSplitsList: document.getElementById('stageGreenSplitsList'),
+    stageGreenAutoNext: document.getElementById('stageGreenAutoNext'),
+    stageNextRepBtn: document.getElementById('stageNextRepBtn'),
+    stageDoneBtn: document.getElementById('stageDoneBtn'),
+
     // View 1: Shot Timer
     timerCard: document.getElementById('timerCard'),
     drillPhaseBadge: document.getElementById('drillPhaseBadge'),
@@ -520,7 +545,7 @@
       // Explicitly cache all assets offline & show browser install instructions
       if ('caches' in window) {
         try {
-          const cache = await caches.open('airsoft-trainer-v2.0');
+          const cache = await caches.open('airsoft-trainer-v2.1');
           await cache.addAll([
             './',
             './index.html',
@@ -1440,6 +1465,12 @@
       el.meterThresholdLine.style.left = `${Math.min(98, displayedThreshold)}%`;
       el.peakValueLabel.textContent = `${vocalPercent}%`;
 
+      if (el.stageMicFill) {
+        el.stageMicFill.style.width = `${vocalPercent}%`;
+        el.stageMicPercent.textContent = `${vocalPercent}%`;
+        el.stageMicThreshold.style.left = `${Math.min(98, displayedThreshold)}%`;
+      }
+
       // Allow live testing of shot signature on Settings screen while IDLE
       if (
         state.phase === 'IDLE' &&
@@ -1491,6 +1522,12 @@
       el.meterPeakHold.style.left = `${Math.min(99, state.peakHold)}%`;
       el.meterThresholdLine.style.left = `${Math.min(98, state.thresholdPercent)}%`;
       el.peakValueLabel.textContent = `${shotCrackPercent}%`;
+
+      if (el.stageMicFill) {
+        el.stageMicFill.style.width = `${shotCrackPercent}%`;
+        el.stageMicPercent.textContent = `${shotCrackPercent}%`;
+        el.stageMicThreshold.style.left = `${Math.min(98, state.thresholdPercent)}%`;
+      }
 
       if (!shotMuted && state.calWizard.active) {
         const bands = computeSixBandSpectrum();
@@ -1978,8 +2015,54 @@
   }
 
   // ==========================================
-  // 11. DRILL EXECUTION ENGINE
+  // 11. DRILL EXECUTION ENGINE & FULL-WINDOW STAGES
   // ==========================================
+  function setFullScreenStage(stageColor, options = {}) {
+    if (!el.drillStageOverlay) return;
+    if (stageColor === 'HIDDEN') {
+      el.drillStageOverlay.classList.add('hidden');
+      return;
+    }
+
+    el.drillStageOverlay.classList.remove(
+      'hidden',
+      'stage-blue',
+      'stage-orange',
+      'stage-red',
+      'stage-green'
+    );
+    el.stageBlueView.classList.add('hidden');
+    el.stageOrangeView.classList.add('hidden');
+    el.stageRedView.classList.add('hidden');
+    el.stageGreenView.classList.add('hidden');
+
+    if (stageColor === 'BLUE') {
+      el.drillStageOverlay.classList.add('stage-blue');
+      el.stageBlueView.classList.remove('hidden');
+      if (options.micLabel && el.stageMicLabel) {
+        el.stageMicLabel.textContent = options.micLabel;
+      }
+    } else if (stageColor === 'ORANGE') {
+      el.drillStageOverlay.classList.add('stage-orange');
+      el.stageOrangeView.classList.remove('hidden');
+      if (options.label !== undefined && el.stageCountdownLabel) {
+        el.stageCountdownLabel.textContent = options.label;
+      }
+      if (options.main !== undefined && el.stageCountdownMain) {
+        el.stageCountdownMain.textContent = options.main;
+      }
+      if (options.clock !== undefined && el.stageCountdownClock) {
+        el.stageCountdownClock.textContent = options.clock;
+      }
+    } else if (stageColor === 'RED') {
+      el.drillStageOverlay.classList.add('stage-red');
+      el.stageRedView.classList.remove('hidden');
+    } else if (stageColor === 'GREEN') {
+      el.drillStageOverlay.classList.add('stage-green');
+      el.stageGreenView.classList.remove('hidden');
+    }
+  }
+
   function clearAllDrillTimers() {
     state.timers.forEach((id) => clearTimeout(id));
     state.timers = [];
@@ -2030,9 +2113,10 @@
     state.shots = [];
     state.prematureShots = 0;
     state.reloadCalled = false;
+    state.signalTimestampMs = 0;
     state.activeContextLabel = `${resolvedBriefing.shooterState} (Rep ${state.activeRepIndex}/${activeItem.reps || 1})`;
 
-    // Reset Timer UI
+    // Reset Timer UI & Full-Screen Red/Green Splits
     el.clockDisplay.innerHTML = `0.00<span class="clock-unit">s</span>`;
     el.shotsCounterDisplay.textContent = `0 / ${totalShots}`;
     el.firstShotDisplay.textContent = '--';
@@ -2041,12 +2125,18 @@
     el.parDeltaDisplay.style.color = 'var(--text-main)';
     el.liveSplitsStrip.innerHTML = `<span class="splits-placeholder">Waiting for signal...</span>`;
     el.currentDrillBriefingDisplay.textContent = `"${resolvedBriefing.fullBriefing}"`;
+    if (el.stageRedSplitsList) el.stageRedSplitsList.innerHTML = '';
+    if (el.stageGreenSplitsList) el.stageGreenSplitsList.innerHTML = '';
+    if (el.stageGreenAutoNext) el.stageGreenAutoNext.textContent = '';
     renderQueueUI();
 
     el.startDrillBtn.disabled = true;
     el.startDrillBtn.textContent = 'START DRILL';
     el.manualShotBtn.disabled = false;
     el.stopDrillBtn.disabled = false;
+
+    // Immediately show Full-Window BLUE screen (only Mic + Ready Button)
+    setFullScreenStage('BLUE', { micLabel: 'BRIEFING • TAP READY TO SKIP' });
 
     // Only announce full description on Rep 1 of each drill
     const isFirstRepOfThisDrill = state.activeRepIndex === 1;
@@ -2085,6 +2175,7 @@
     state.vocalActiveFrames = 0;
     state.vocalQuietTailFrames = 0;
 
+    setFullScreenStage('BLUE', { micLabel: 'ASKING "SHOOTER READY?"' });
     setDrillPhaseUI(
       'ASKING_READY',
       `REP ${cfg.repNumber}/${cfg.totalReps} • ASKING READY`
@@ -2100,6 +2191,7 @@
         state.readyListenEligibleAtMs = nowMs + 380;
         state.ignoreVoiceUntilMs = nowMs + 380;
 
+        setFullScreenStage('BLUE', { micLabel: 'SAY "READY" OR TAP READY' });
         setDrillPhaseUI(
           'WAITING_FOR_READY',
           `REP ${cfg.repNumber}/${cfg.totalReps} • SAY "READY"`
@@ -2117,8 +2209,19 @@
   }
 
   function confirmShooterReady(triggerSource = 'Voice') {
-    if (state.phase !== 'WAITING_FOR_READY') return;
+    if (
+      state.phase !== 'WAITING_FOR_READY' &&
+      state.phase !== 'BRIEFING' &&
+      state.phase !== 'ASKING_READY'
+    ) {
+      return;
+    }
 
+    clearAllDrillTimers();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    state.isSpeakingTts = false;
     state.readyListenerArmed = false;
     el.startDrillBtn.disabled = true;
     el.startDrillBtn.textContent = 'START DRILL';
@@ -2134,6 +2237,12 @@
     const cfg = state.activeRunConfig;
     if (!cfg) return;
 
+    // Switch Full-Window screen to ORANGE Countdown until firing
+    setFullScreenStage('ORANGE', {
+      label: `REP ${cfg.repNumber}/${cfg.totalReps} • STANDBY`,
+      main: 'WAIT',
+      clock: '0.00s'
+    });
     setDrillPhaseUI('COUNTDOWN', `REP ${cfg.repNumber}/${cfg.totalReps} • STANDBY`);
 
     if (cfg.drillId === 'walk_draw_shoot') {
@@ -2171,6 +2280,11 @@
     const targetSec = Math.max(0.5, Number(cfg.targetSec) || 3.0);
     const wholeSec = Math.round(targetSec);
 
+    setFullScreenStage('ORANGE', {
+      label: `DRAW IN ${targetSec}s`,
+      main: 'DRAW!',
+      clock: '0.00s'
+    });
     setDrillPhaseUI('COUNTDOWN', `REP ${cfg.repNumber}/${cfg.totalReps} • DRAW!`);
     el.activeCueBanner.textContent = `DRAW! Counting down ${targetSec}s to FIRE...`;
     el.liveSplitsStrip.innerHTML = '';
@@ -2193,6 +2307,10 @@
             if (state.phase !== 'LIVE') return;
             el.activeCueBanner.textContent = `FIRE! (${targetSec.toFixed(2)}s Mark)`;
             if (state.shots.length === 0) {
+              setFullScreenStage('ORANGE', {
+                label: 'ENGAGE TARGET',
+                main: 'FIRE!'
+              });
               speakCue('Fire!', {
                 rateOverride: 1.45,
                 postGuardMs: 120,
@@ -2209,6 +2327,12 @@
           scheduleTimeout(() => {
             if (state.phase !== 'COUNTDOWN' && state.phase !== 'LIVE') return;
             el.activeCueBanner.textContent = `Draw Countdown: ${countNum}...`;
+            if (state.shots.length === 0) {
+              setFullScreenStage('ORANGE', {
+                label: 'DRAW COUNTDOWN',
+                main: String(countNum)
+              });
+            }
             speakCue(String(countNum), {
               rateOverride: 1.35,
               postGuardMs: 180,
@@ -2234,6 +2358,10 @@
           }
           el.activeCueBanner.textContent = `FIRE! (${targetSec.toFixed(2)}s Target Mark)`;
           if (state.shots.length === 0) {
+            setFullScreenStage('ORANGE', {
+              label: 'ENGAGE TARGET',
+              main: 'FIRE!'
+            });
             speakCue('Fire!', {
               rateOverride: 1.45,
               postGuardMs: 120,
@@ -2251,6 +2379,10 @@
       scheduleTimeout(() => {
         if (state.phase !== 'COUNTDOWN') return;
         el.activeCueBanner.textContent = `Countdown: ${step}...`;
+        setFullScreenStage('ORANGE', {
+          label: 'COUNTDOWN',
+          main: step
+        });
         speakCue(step, { rateOverride: 1.3, postGuardMs: 140 });
       }, idx * 1000);
     });
@@ -2261,6 +2393,10 @@
         beginLiveFirePhase();
       } else {
         el.activeCueBanner.textContent = 'Standby...';
+        setFullScreenStage('ORANGE', {
+          label: 'STANDBY',
+          main: '...'
+        });
         const randomDelayMs = Math.floor(1200 + Math.random() * 2000);
         scheduleTimeout(() => beginLiveFirePhase(), randomDelayMs);
       }
@@ -2270,6 +2406,10 @@
   function runWalkTwoStageDrill(cfg) {
     const walkPhrase = cfg.resolvedBriefing.resolvedWalk;
     setDrillPhaseUI('WALKING', 'STAGE 1: WALKING');
+    setFullScreenStage('ORANGE', {
+      label: 'STAGE 1: WALKING',
+      main: 'WALK'
+    });
     el.activeCueBanner.textContent = `Begin ${walkPhrase} (Holstered)...`;
 
     speakCue(`Begin ${walkPhrase}`, {
@@ -2280,6 +2420,10 @@
         scheduleTimeout(() => {
           if (state.phase !== 'WALKING') return;
           setDrillPhaseUI('DRAWN_WAITING', '1ST SIGNAL: DRAW!');
+          setFullScreenStage('ORANGE', {
+            label: '1ST SIGNAL',
+            main: 'DRAW!'
+          });
           state.firstSignalTimestampMs = performance.now();
           el.activeCueBanner.textContent =
             '1ST SIGNAL: DRAW WEAPON! (Wait for 2nd signal to shoot)';
@@ -2323,6 +2467,10 @@
       voiceSignal = 'Turn and Fire!';
     }
 
+    setFullScreenStage('ORANGE', {
+      label: 'ENGAGE TARGET',
+      main: voiceSignal.toUpperCase()
+    });
     setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • LIVE FIRE!`);
     el.activeCueBanner.textContent = `SIGNAL: ${voiceSignal.toUpperCase()}`;
     el.liveSplitsStrip.innerHTML = '';
@@ -2360,6 +2508,9 @@
       }
       const elapsedSec = (performance.now() - state.signalTimestampMs) / 1000;
       el.clockDisplay.innerHTML = `${elapsedSec.toFixed(2)}<span class="clock-unit">s</span>`;
+      if (el.stageCountdownClock && state.shots.length === 0) {
+        el.stageCountdownClock.textContent = `${elapsedSec.toFixed(2)}s`;
+      }
       state.rafId = requestAnimationFrame(tick);
     };
     state.rafId = requestAnimationFrame(tick);
@@ -2398,12 +2549,29 @@
         ? `${shotRecord.elapsedSec.toFixed(2)}s`
         : `+${shotRecord.splitSec.toFixed(2)}s`;
 
-    const chip = document.createElement('span');
-    chip.className = `split-chip${isReloadSplit ? ' reload-chip' : ''}`;
-    chip.textContent = isReloadSplit
+    const splitText = isReloadSplit
       ? `#${shotNumber} RELOAD: ${shotRecord.elapsedSec.toFixed(2)}s (+${shotRecord.splitSec.toFixed(2)}s)`
       : `#${shotNumber}: ${shotRecord.elapsedSec.toFixed(2)}s (${shotNumber === 1 ? '1st' : '+' + shotRecord.splitSec.toFixed(2) + 's'})`;
+
+    const chip = document.createElement('span');
+    chip.className = `split-chip${isReloadSplit ? ' reload-chip' : ''}`;
+    chip.textContent = splitText;
     el.liveSplitsStrip.appendChild(chip);
+
+    // First shot turns full-window screen RED with just the shots registering!
+    setFullScreenStage('RED');
+    if (el.stageRedShotsCounter) {
+      el.stageRedShotsCounter.textContent = `${shotNumber} / ${state.expectedTotalShots}`;
+    }
+    if (el.stageRedSubLabel) {
+      el.stageRedSubLabel.textContent = 'SHOTS REGISTERED';
+    }
+    if (el.stageRedSplitsList) {
+      const pill = document.createElement('div');
+      pill.className = 'stage-split-pill';
+      pill.textContent = splitText;
+      el.stageRedSplitsList.appendChild(pill);
+    }
 
     if (
       state.includeReload &&
@@ -2413,6 +2581,9 @@
     ) {
       state.reloadCalled = true;
       el.activeCueBanner.textContent = 'RELOAD! Perform Speed Reload & Fire Follow-Up Shots!';
+      if (el.stageRedSubLabel) {
+        el.stageRedSubLabel.textContent = 'RELOAD! THEN FIRE!';
+      }
       speakCue('Reload!', {
         rateOverride: 1.35,
         postGuardMs: 140,
@@ -2422,7 +2593,14 @@
     }
 
     if (shotNumber >= state.expectedTotalShots) {
-      completeDrillRun();
+      if (state.expectedTotalShots === 1) {
+        // Brief Red flash on 1-shot drills so Red stage is visible before turning Green
+        scheduleTimeout(() => {
+          if (state.phase === 'LIVE') completeDrillRun();
+        }, 420);
+      } else {
+        completeDrillRun();
+      }
     }
   }
 
@@ -2450,6 +2628,18 @@
           : 'var(--accent-amber)';
 
     setDrillPhaseUI('IDLE', `REP ${cfg.repNumber}/${cfg.totalReps} COMPLETE`);
+
+    // Turn Full-Window Screen GREEN on completion!
+    setFullScreenStage('GREEN');
+    if (el.stageGreenTotalTime) {
+      el.stageGreenTotalTime.textContent = `${totalSec.toFixed(2)}s`;
+    }
+    if (el.stageGreenMetrics) {
+      el.stageGreenMetrics.textContent = `1st Shot: ${firstShotSec.toFixed(2)}s • Shots: ${state.shots.length}/${state.expectedTotalShots} (${deltaSign}${deltaSec.toFixed(2)}s)`;
+    }
+    if (el.stageGreenSplitsList && el.stageRedSplitsList) {
+      el.stageGreenSplitsList.innerHTML = el.stageRedSplitsList.innerHTML;
+    }
 
     if (cfg.drillId === 'draw_exact') {
       el.activeCueBanner.textContent = `Rep ${cfg.repNumber}/${cfg.totalReps} Done! Target: ${targetSec.toFixed(2)}s | 1st: ${firstShotSec.toFixed(2)}s | Total: ${totalSec.toFixed(2)}s`;
@@ -2502,11 +2692,16 @@
     if (el.autoPromptReadyCheckbox.checked && hasMoreInSet) {
       const restSec = Math.max(2, parseInt(el.autoRepeatSecInput.value, 10) || 4);
       el.activeCueBanner.textContent += ` • Next rep in ${restSec}s...`;
+      if (el.stageGreenAutoNext) {
+        el.stageGreenAutoNext.textContent = `Next rep starting in ${restSec}s...`;
+      }
       scheduleTimeout(() => {
         if (state.phase === 'IDLE' && el.autoPromptReadyCheckbox.checked) {
           startActiveQueuedDrill();
         }
       }, restSec * 1000);
+    } else if (el.stageGreenAutoNext) {
+      el.stageGreenAutoNext.textContent = 'Set Complete!';
     }
   }
 
@@ -2523,6 +2718,7 @@
       return;
     }
 
+    setFullScreenStage('HIDDEN');
     state.phase = 'IDLE';
     setDrillPhaseUI('IDLE', 'STANDBY / IDLE');
     el.activeCueBanner.textContent = reason;
@@ -2742,6 +2938,44 @@
       registerShot(performance.now(), 'TAP')
     );
     el.stopDrillBtn.addEventListener('click', () => stopDrill('Drill stopped'));
+
+    // Full-Window Stage Overlay Controls
+    if (el.stageReadyBtn) {
+      el.stageReadyBtn.addEventListener('click', () =>
+        confirmShooterReady('Ready Button')
+      );
+    }
+    if (el.stageExitBtn) {
+      el.stageExitBtn.addEventListener('click', () => {
+        stopDrill('Drill stopped');
+        setFullScreenStage('HIDDEN');
+      });
+    }
+    if (el.stageOrangeView) {
+      el.stageOrangeView.addEventListener('click', () => {
+        if (state.phase === 'LIVE') {
+          registerShot(performance.now(), 'TAP');
+        }
+      });
+    }
+    if (el.stageRedView) {
+      el.stageRedView.addEventListener('click', () => {
+        if (state.phase === 'LIVE') {
+          registerShot(performance.now(), 'TAP');
+        }
+      });
+    }
+    if (el.stageNextRepBtn) {
+      el.stageNextRepBtn.addEventListener('click', () => {
+        startActiveQueuedDrill();
+      });
+    }
+    if (el.stageDoneBtn) {
+      el.stageDoneBtn.addEventListener('click', () => {
+        clearAllDrillTimers();
+        setFullScreenStage('HIDDEN');
+      });
+    }
 
     el.drillTiles.forEach((tile) => {
       tile.addEventListener('click', () => {

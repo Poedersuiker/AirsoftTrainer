@@ -10,7 +10,7 @@
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="apple-touch-icon" href="icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=2.0" />
+  <link rel="stylesheet" href="style.css?v=2.1" />
 </head>
 <body>
   <div class="app-shell">
@@ -58,7 +58,7 @@
         <div class="drawer-brand">
           <img src="icon.svg" alt="Reticle" class="brand-icon" />
           <div>
-            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v2.0</span></strong>
+            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v2.1</span></strong>
             <span id="offlineStatusText" class="drawer-subtitle">Offline PWA Ready</span>
           </div>
         </div>
@@ -88,9 +88,67 @@
           + Install / Cache Offline App
         </button>
         <div id="installHelpNote" class="helper-text hidden" style="font-size:0.72rem;color:#fde68a;margin-bottom:0.45rem;"></div>
-        <div>App Version: <strong>v2.0</strong></div>
+        <div>App Version: <strong>v2.1</strong></div>
       </div>
     </aside>
+
+    <!-- ======================================================== -->
+    <!-- FULL-WINDOW COLOR-CODED DRILL STAGE OVERLAY              -->
+    <!-- Blue (Ready) -> Orange (Countdown) -> Red (Shots) -> Green -->
+    <!-- ======================================================== -->
+    <div id="drillStageOverlay" class="drill-stage-overlay stage-blue hidden">
+      <button id="stageExitBtn" class="stage-exit-btn" type="button" aria-label="Stop Drill">&times;</button>
+
+      <!-- STAGE 1: BLUE (ONLY MIC + READY BUTTON) -->
+      <div id="stageBlueView" class="stage-view">
+        <div class="stage-mic-box">
+          <div class="stage-mic-header">
+            <span class="stage-mic-dot"></span>
+            <span id="stageMicLabel">MIC LISTENING</span>
+            <span id="stageMicPercent">0%</span>
+          </div>
+          <div class="stage-mic-track">
+            <div id="stageMicFill" class="stage-mic-fill"></div>
+            <div id="stageMicThreshold" class="stage-mic-threshold" style="left: 18%;"></div>
+          </div>
+        </div>
+
+        <button id="stageReadyBtn" class="stage-ready-btn" type="button">
+          READY
+        </button>
+      </div>
+
+      <!-- STAGE 2: ORANGE (COUNTDOWN UNTIL FIRING / 1ST SHOT) -->
+      <div id="stageOrangeView" class="stage-view hidden" role="button" tabindex="0" aria-label="Countdown Stage">
+        <div id="stageCountdownLabel" class="stage-countdown-sub">STANDBY</div>
+        <div id="stageCountdownMain" class="stage-countdown-giant">READY</div>
+        <div id="stageCountdownClock" class="stage-countdown-clock">0.00s</div>
+      </div>
+
+      <!-- STAGE 3: RED (FIRST SHOT -> JUST SHOTS REGISTERING UNTIL COMPLETED) -->
+      <div id="stageRedView" class="stage-view hidden" role="button" tabindex="0" aria-label="Shots Registering Stage">
+        <div id="stageRedShotsCounter" class="stage-shots-giant">1 / 2</div>
+        <div id="stageRedSubLabel" class="stage-shots-sub">SHOTS REGISTERED</div>
+        <div id="stageRedSplitsList" class="stage-splits-list"></div>
+      </div>
+
+      <!-- STAGE 4: GREEN (COMPLETED) -->
+      <div id="stageGreenView" class="stage-view hidden">
+        <div class="stage-complete-title">COMPLETE</div>
+        <div id="stageGreenTotalTime" class="stage-complete-time">0.00s</div>
+        <div id="stageGreenMetrics" class="stage-complete-metrics">1st Shot: -- • Shots: 0/0</div>
+        <div id="stageGreenSplitsList" class="stage-splits-list"></div>
+        <div id="stageGreenAutoNext" class="stage-auto-next"></div>
+        <div class="stage-green-actions">
+          <button id="stageNextRepBtn" class="stage-action-btn stage-btn-light" type="button">
+            NEXT REP
+          </button>
+          <button id="stageDoneBtn" class="stage-action-btn stage-btn-outline" type="button">
+            EXIT
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- MAIN CONTENT VIEWS -->
     <main class="main-content">
@@ -672,6 +730,6 @@
     </main>
   </div>
 
-  <script src="script.js?v=2.0"></script>
+  <script src="script.js?v=2.1"></script>
 </body>
 </html>

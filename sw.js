@@ -1,11 +1,11 @@
-const CACHE_NAME = 'airsoft-trainer-v2.0';
+const CACHE_NAME = 'airsoft-trainer-v2.1';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './style.css',
-  './style.css?v=2.0',
+  './style.css?v=2.1',
   './script.js',
-  './script.js?v=2.0',
+  './script.js?v=2.1',
   './manifest.json',
   './icon.svg',
   './icon-192.png',
