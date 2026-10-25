@@ -161,6 +161,8 @@
     viewPanels: document.querySelectorAll('.view-panel'),
     offlineStatusText: document.getElementById('offlineStatusText'),
     installPwaBtn: document.getElementById('installPwaBtn'),
+    drawerInstallBtn: document.getElementById('drawerInstallBtn'),
+    installHelpNote: document.getElementById('installHelpNote'),
 
     // Top Mic & Wake Lock Widgets
     micQuickToggleBtn: document.getElementById('micQuickToggleBtn'),
@@ -439,19 +441,71 @@
     window.addEventListener('online', updateOnlineStatus);
     window.addEventListener('offline', updateOnlineStatus);
 
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      window.navigator.standalone === true;
+
+    if (isStandalone) {
+      el.installPwaBtn.classList.add('hidden');
+      if (el.drawerInstallBtn) {
+        el.drawerInstallBtn.textContent = 'App Installed (Offline Ready)';
+      }
+    }
+
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
       deferredInstallPrompt = e;
       el.installPwaBtn.classList.remove('hidden');
+      if (el.drawerInstallBtn) {
+        el.drawerInstallBtn.textContent = '+ Install App Now';
+      }
     });
 
-    el.installPwaBtn.addEventListener('click', async () => {
-      if (!deferredInstallPrompt) return;
-      deferredInstallPrompt.prompt();
-      await deferredInstallPrompt.userChoice;
+    window.addEventListener('appinstalled', () => {
       deferredInstallPrompt = null;
       el.installPwaBtn.classList.add('hidden');
+      if (el.drawerInstallBtn) {
+        el.drawerInstallBtn.textContent = 'App Installed (Offline Ready)';
+      }
     });
+
+    const handleInstallClick = async () => {
+      if (deferredInstallPrompt) {
+        deferredInstallPrompt.prompt();
+        await deferredInstallPrompt.userChoice;
+        deferredInstallPrompt = null;
+        return;
+      }
+
+      // Explicitly cache all assets offline & show browser install instructions
+      if ('caches' in window) {
+        try {
+          const cache = await caches.open('airsoft-trainer-v1.6');
+          await cache.addAll([
+            './',
+            './index.html',
+            './style.css',
+            './script.js',
+            './manifest.json',
+            './icon.svg',
+            './icon-192.png',
+            './icon-512.png'
+          ]);
+        } catch (_) {}
+      }
+
+      openDrawer();
+      if (el.installHelpNote) {
+        el.installHelpNote.classList.remove('hidden');
+        el.installHelpNote.innerHTML =
+          'Offline cache verified &amp; saved! To add the app icon to your Android home screen, tap your browser&rsquo;s <strong>&vellip;</strong> menu (top right) &rarr; <strong>Install app</strong> (or <strong>Add to Home screen</strong>).';
+      }
+    };
+
+    el.installPwaBtn.addEventListener('click', handleInstallClick);
+    if (el.drawerInstallBtn) {
+      el.drawerInstallBtn.addEventListener('click', handleInstallClick);
+    }
   }
 
   function updateOnlineStatus() {

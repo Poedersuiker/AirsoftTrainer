@@ -1,11 +1,13 @@
-const CACHE_NAME = 'airsoft-trainer-v1.5';
+const CACHE_NAME = 'airsoft-trainer-v1.6';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './style.css',
   './script.js',
   './manifest.json',
-  './icon.svg'
+  './icon.svg',
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {

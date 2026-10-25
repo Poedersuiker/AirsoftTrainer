@@ -47,8 +47,8 @@
           <span class="wake-dot"></span>
           <span id="wakeLockText">LOCK</span>
         </button>
-        <button id="installPwaBtn" class="btn-install hidden" type="button" title="Install Offline App">
-          Install
+        <button id="installPwaBtn" class="btn-install" type="button" title="Install Offline App">
+          + Install
         </button>
       </div>
     </header>
@@ -60,7 +60,7 @@
         <div class="drawer-brand">
           <img src="icon.svg" alt="Reticle" class="brand-icon" />
           <div>
-            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v1.5</span></strong>
+            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v1.6</span></strong>
             <span id="offlineStatusText" class="drawer-subtitle">Offline PWA Ready</span>
           </div>
         </div>
@@ -86,7 +86,11 @@
         </button>
       </nav>
       <div class="drawer-footer" id="drawerVersionFooter">
-        App Version: <strong>v1.5</strong>
+        <button id="drawerInstallBtn" class="btn-primary" type="button" style="width:100%;padding:0.65rem;font-size:0.84rem;margin-bottom:0.55rem;">
+          + Install / Cache Offline App
+        </button>
+        <div id="installHelpNote" class="helper-text hidden" style="font-size:0.72rem;color:#fde68a;margin-bottom:0.45rem;"></div>
+        <div>App Version: <strong>v1.6</strong></div>
       </div>
     </aside>
 
