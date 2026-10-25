@@ -1,8 +1,8 @@
 /**
  * Tactical Airsoft Shot Timer & Drill Trainer
  * Offline-First PWA with Wake Lock, Web Audio GBB Shot Detection,
- * Hands-Free Voice / Clap Commands, Pre-Drill Shooter State + Action Briefing,
- * Multi-Drill Queue Builder, and Split Logging.
+ * Strict Anti-Self-Trigger Voice Recognition, 1st-Rep Drill Briefing,
+ * "Shooter ready?" Voice Gate, Multi-Rep Drill Queue, and Split Logging.
  */
 
 (() => {
@@ -78,15 +78,17 @@
     // Builder form selection
     builderDrillId: 'draw_exact',
 
-    // Drill Queue & Active Queue Index
+    // Drill Queue & Rep Tracking
     queue: [],
     activeQueueIndex: 0,
+    activeRepIndex: 1, // 1-based current repetition of active queued drill
 
     // Active run execution state
-    phase: 'IDLE', // 'IDLE' | 'BRIEFING' | 'COUNTDOWN' | 'WALKING' | 'DRAWN_WAITING' | 'LIVE'
+    // 'IDLE' | 'BRIEFING' | 'ASKING_READY' | 'WAITING_FOR_READY' | 'COUNTDOWN' | 'WALKING' | 'DRAWN_WAITING' | 'LIVE'
+    phase: 'IDLE',
     timers: [],
     rafId: null,
-    activeRunConfig: null, // Resolved drill config for current run
+    activeRunConfig: null,
 
     // Run timing metrics
     signalTimestampMs: 0,
@@ -116,15 +118,20 @@
     thresholdPercent: 62,
     debounceMs: 115,
     lastShotTimestampMs: 0,
-    muteShotDetectionUntilMs: 0,
 
-    // Double-clap offline start detector
-    clapTimestamps: [],
+    // Strict Self-Audio Lockout Timestamps (prevents app from responding to its own voice/beeps)
+    muteShotDetectionUntilMs: 0,
+    ignoreVoiceUntilMs: 0,
+    readyListenEligibleAtMs: 0,
+    isSpeakingTts: false,
 
     // Speech Recognition
     recognition: null,
-    voiceCmdEnabled: false,
-    isSpeakingTts: false,
+    speechRecSupported: false,
+    speechRecHadNetworkError: false,
+    voiceCmdEnabled: true,
+    recognitionRunning: false,
+    recognitionResumeTimer: null,
 
     // Persisted Logs
     logs: []
@@ -132,7 +139,7 @@
 
   const STORAGE_KEYS = {
     LOGS: 'airsoft_trainer_logs_v1',
-    QUEUE: 'airsoft_trainer_queue_v1'
+    QUEUE: 'airsoft_trainer_queue_v2'
   };
 
   // ==========================================
@@ -191,7 +198,7 @@
     // View 2: Drills & Queue Builder
     queueTotalBadge: document.getElementById('queueTotalBadge'),
     autoAdvanceQueueCheckbox: document.getElementById('autoAdvanceQueueCheckbox'),
-    autoRepeatCheckbox: document.getElementById('autoRepeatCheckbox'),
+    autoPromptReadyCheckbox: document.getElementById('autoPromptReadyCheckbox'),
     paramAutoRepeatDelayWrap: document.getElementById('paramAutoRepeatDelayWrap'),
     autoRepeatSecInput: document.getElementById('autoRepeatSecInput'),
     drillQueueList: document.getElementById('drillQueueList'),
@@ -203,6 +210,7 @@
     builderBriefingText: document.getElementById('builderBriefingText'),
     testBriefingSpeakBtn: document.getElementById('testBriefingSpeakBtn'),
 
+    drillRepsInput: document.getElementById('drillRepsInput'),
     paramTargetSecondsWrap: document.getElementById('paramTargetSecondsWrap'),
     targetSecondsLabel: document.getElementById('targetSecondsLabel'),
     targetSecondsInput: document.getElementById('targetSecondsInput'),
@@ -238,6 +246,7 @@
     announceDrillExplanationCheckbox: document.getElementById(
       'announceDrillExplanationCheckbox'
     ),
+    requireReadyVoiceCheckbox: document.getElementById('requireReadyVoiceCheckbox'),
     countdownModeSelect: document.getElementById('countdownModeSelect'),
     thresholdSlider: document.getElementById('thresholdSlider'),
     thresholdSliderVal: document.getElementById('thresholdSliderVal'),
@@ -247,7 +256,9 @@
     testBeepBtn: document.getElementById('testBeepBtn'),
 
     enableSpeechRecCheckbox: document.getElementById('enableSpeechRecCheckbox'),
-    enableClapStartCheckbox: document.getElementById('enableClapStartCheckbox'),
+    enableAcousticReadyFallbackCheckbox: document.getElementById(
+      'enableAcousticReadyFallbackCheckbox'
+    ),
     voiceHeardBanner: document.getElementById('voiceHeardBanner'),
 
     signalStyleSelect: document.getElementById('signalStyleSelect'),
@@ -284,11 +295,6 @@
     return `${n} seconds`;
   }
 
-  /**
-   * Builds the Shooter State + Action explanation for any drill item.
-   * When resolveRandoms is true (at the start of an actual drill run),
-   * random turn angles or walk directions are resolved into concrete instructions.
-   */
   function generateDrillBriefing(item, resolveRandoms = false) {
     const drillId = item.drillId;
     const shotsPhrase = formatShotCountPhrase(item.shots);
@@ -512,7 +518,7 @@
   );
 
   // ==========================================
-  // 8. WEB AUDIO API: PIEZO BEEPS & GBB MIC DETECTOR
+  // 8. WEB AUDIO API & STRICT SELF-AUDIO ISOLATION
   // ==========================================
   function ensureAudioContext() {
     if (!state.audioCtx) {
@@ -525,6 +531,30 @@
     return state.audioCtx;
   }
 
+  /**
+   * Returns true if the app's own TTS or piezo buzzer is currently playing
+   * or within its post-playback room-echo guard window.
+   */
+  function isSelfAudioActive(nowMs = performance.now()) {
+    const synthSpeaking =
+      state.isSpeakingTts ||
+      ('speechSynthesis' in window && window.speechSynthesis.speaking);
+    if (synthSpeaking) {
+      // Continuously push lockout forward while speaker is active
+      state.muteShotDetectionUntilMs = Math.max(
+        state.muteShotDetectionUntilMs,
+        nowMs + 550
+      );
+      state.ignoreVoiceUntilMs = Math.max(state.ignoreVoiceUntilMs, nowMs + 800);
+      return true;
+    }
+    return nowMs < state.muteShotDetectionUntilMs;
+  }
+
+  /**
+   * Plays a competition shot-timer piezo buzzer or cadence tick.
+   * Aborts voice recognition & locks out shot detection while playing.
+   */
   function playTimerBeep(durationMs = 220, freqHz = null, gainLevel = 0.65) {
     const ctx = ensureAudioContext();
     const frequency = freqHz || Number(el.beepFreqSelect.value) || 2400;
@@ -532,7 +562,11 @@
     const nowMs = performance.now();
     state.muteShotDetectionUntilMs = Math.max(
       state.muteShotDetectionUntilMs,
-      nowMs + durationMs + 115
+      nowMs + durationMs + 180
+    );
+    state.ignoreVoiceUntilMs = Math.max(
+      state.ignoreVoiceUntilMs,
+      nowMs + durationMs + 450
     );
 
     const osc = ctx.createOscillator();
@@ -553,24 +587,37 @@
     osc.stop(ctx.currentTime + durationMs / 1000 + 0.01);
   }
 
+  /**
+   * Speaks a tactical cue via TTS while strictly suspending SpeechRecognition
+   * and locking out the acoustic microphone so the app NEVER responds to its own voice.
+   */
   function speakCue(text, { onEnd = null, playBeepAfter = false } = {}) {
+    // 1. Immediately abort SpeechRecognition so its mic buffer doesn't record our speaker!
+    suspendSpeechRecognitionForSelfAudio();
+
     if (!('speechSynthesis' in window)) {
       if (playBeepAfter) playTimerBeep(240);
-      if (onEnd) setTimeout(onEnd, 250);
+      resumeSpeechRecognitionAfterSelfAudio(450);
+      if (onEnd) setTimeout(onEnd, 300);
       return;
     }
 
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = parseFloat(el.ttsRateSlider.value) || 1.1;
+    utter.rate = parseFloat(el.ttsRateSlider.value) || 1.05;
     utter.pitch = 0.96;
     utter.volume = 1.0;
 
-    const estimatedMs = Math.max(500, text.length * 68);
+    const estimatedMs = Math.max(600, text.length * 75);
+    const nowMs = performance.now();
     state.isSpeakingTts = true;
     state.muteShotDetectionUntilMs = Math.max(
       state.muteShotDetectionUntilMs,
-      performance.now() + estimatedMs + 180
+      nowMs + estimatedMs + 600
+    );
+    state.ignoreVoiceUntilMs = Math.max(
+      state.ignoreVoiceUntilMs,
+      nowMs + estimatedMs + 850
     );
 
     let finished = false;
@@ -578,18 +625,35 @@
       if (finished) return;
       finished = true;
       state.isSpeakingTts = false;
-      state.muteShotDetectionUntilMs = Math.max(
-        state.muteShotDetectionUntilMs,
-        performance.now() + 120
-      );
-      if (playBeepAfter) playTimerBeep(240);
+
+      const endNow = performance.now();
+      // Keep a 500ms post-speech acoustic guard so room echo of the phone speaker dies completely
+      state.muteShotDetectionUntilMs = endNow + 450;
+      state.ignoreVoiceUntilMs = endNow + 650;
+
+      if (playBeepAfter) {
+        playTimerBeep(240);
+      }
+
+      // Resume voice recognition only after the speaker echo has died down
+      resumeSpeechRecognitionAfterSelfAudio(500);
+
       if (onEnd) onEnd();
     };
 
     utter.onend = finishHandler;
     utter.onerror = finishHandler;
 
-    setTimeout(finishHandler, estimatedMs + 1100);
+    // Poll speechSynthesis.speaking in case Android WebView takes longer or misses onend
+    const safetyWatchdog = setTimeout(() => {
+      if (!window.speechSynthesis.speaking) {
+        finishHandler();
+      } else {
+        setTimeout(finishHandler, 1500);
+      }
+    }, estimatedMs + 1200);
+
+    state.timers.push(safetyWatchdog);
     window.speechSynthesis.speak(utter);
   }
 
@@ -669,6 +733,9 @@
   function runMicLoop() {
     if (!state.micEnabled || !state.analyser) return;
 
+    const nowMs = performance.now();
+    const selfAudioBusy = isSelfAudioActive(nowMs);
+
     state.analyser.getByteTimeDomainData(state.timeDomainData);
     let maxDeviation = 0;
     const buf = state.timeDomainData;
@@ -677,10 +744,12 @@
       if (dev > maxDeviation) maxDeviation = dev;
     }
 
-    const peakPercent = Math.min(100, Math.round((maxDeviation / 128) * 100));
+    // While the app itself is speaking or beeping, show 0% on the GBB meter so the user sees it's muted
+    const peakPercent = selfAudioBusy
+      ? 0
+      : Math.min(100, Math.round((maxDeviation / 128) * 100));
     state.currentPeak = peakPercent;
 
-    const nowMs = performance.now();
     if (peakPercent >= state.peakHold || nowMs > state.peakHoldDecayTime) {
       state.peakHold = peakPercent;
       state.peakHoldDecayTime = nowMs + 900;
@@ -691,9 +760,8 @@
     el.peakValueLabel.textContent = `${peakPercent}%`;
 
     if (
+      !selfAudioBusy &&
       peakPercent >= state.thresholdPercent &&
-      nowMs > state.muteShotDetectionUntilMs &&
-      !state.isSpeakingTts &&
       nowMs - state.lastShotTimestampMs >= state.debounceMs
     ) {
       state.lastShotTimestampMs = nowMs;
@@ -709,138 +777,194 @@
     } else if (state.phase === 'WALKING' || state.phase === 'DRAWN_WAITING') {
       state.prematureShots++;
       el.activeCueBanner.textContent = `EARLY SHOT DETECTED! Wait for 2nd "Fire!" signal!`;
-    } else if (state.phase === 'IDLE' && el.enableClapStartCheckbox.checked) {
-      state.clapTimestamps = state.clapTimestamps.filter((t) => nowMs - t < 750);
-      state.clapTimestamps.push(nowMs);
-      if (state.clapTimestamps.length >= 2) {
-        const gap =
-          state.clapTimestamps[state.clapTimestamps.length - 1] -
-          state.clapTimestamps[state.clapTimestamps.length - 2];
-        if (gap >= 160 && gap <= 720) {
-          state.clapTimestamps = [];
-          startActiveQueuedDrill();
-        }
-      }
+    } else if (
+      state.phase === 'WAITING_FOR_READY' &&
+      nowMs > state.readyListenEligibleAtMs &&
+      el.enableAcousticReadyFallbackCheckbox.checked &&
+      (!state.speechRecSupported || state.speechRecHadNetworkError || !navigator.onLine)
+    ) {
+      // Offline acoustic fallback when Web Speech API is unavailable/offline
+      el.voiceHeardBanner.innerHTML = `Voice/Audio Trigger Heard &rarr; <strong>"Ready!"</strong>`;
+      confirmShooterReady('Offline Voice Trigger');
     }
   }
 
   // ==========================================
-  // 9. HANDS-FREE VOICE COMMANDS
+  // 9. HANDS-FREE VOICE RECOGNITION (ANTI-SELF-TRIGGER)
   // ==========================================
-  function updateHandsFreeQuickBadge() {
-    if (state.voiceCmdEnabled) {
-      el.voiceQuickBadge.textContent = 'Voice: ON';
-    } else if (el.enableClapStartCheckbox.checked) {
-      el.voiceQuickBadge.textContent = 'Clap: ON';
-    } else {
-      el.voiceQuickBadge.textContent = 'Manual';
-    }
-  }
-
-  function toggleVoiceCommands(forceState = null) {
+  function initSpeechRecognition() {
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRec) {
-      el.voiceHeardBanner.innerHTML =
-        'SpeechRecognition unavailable — <strong>Double-Clap to Start</strong> is active!';
-      el.enableSpeechRecCheckbox.checked = false;
-      updateHandsFreeQuickBadge();
+      state.speechRecSupported = false;
+      el.voiceQuickBadge.textContent = 'Offline Mic';
       return;
     }
 
-    const shouldEnable =
-      forceState !== null ? forceState : !state.voiceCmdEnabled;
+    state.speechRecSupported = true;
+    const rec = new SpeechRec();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = 'en-US';
 
-    if (!shouldEnable) {
-      state.voiceCmdEnabled = false;
-      el.enableSpeechRecCheckbox.checked = false;
-      if (state.recognition) {
+    rec.onstart = () => {
+      state.recognitionRunning = true;
+      updateHandsFreeQuickBadge();
+    };
+
+    rec.onresult = (event) => {
+      const nowMs = performance.now();
+      // Strictly ignore anything captured while TTS/Buzzer was active or cooling down
+      if (isSelfAudioActive(nowMs) || nowMs < state.ignoreVoiceUntilMs) {
+        return;
+      }
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript.trim().toLowerCase();
+        if (transcript) {
+          processVoiceCommand(transcript, nowMs);
+        }
+      }
+    };
+
+    rec.onerror = (event) => {
+      if (event.error === 'network' || event.error === 'service-not-allowed') {
+        state.speechRecHadNetworkError = true;
+      }
+    };
+
+    rec.onend = () => {
+      state.recognitionRunning = false;
+      updateHandsFreeQuickBadge();
+      // Auto-restart only if voice commands are enabled AND app is not currently speaking
+      if (
+        (state.voiceCmdEnabled || state.phase === 'WAITING_FOR_READY') &&
+        !isSelfAudioActive()
+      ) {
+        resumeSpeechRecognitionAfterSelfAudio(250);
+      }
+    };
+
+    state.recognition = rec;
+  }
+
+  function suspendSpeechRecognitionForSelfAudio() {
+    if (state.recognitionResumeTimer) {
+      clearTimeout(state.recognitionResumeTimer);
+      state.recognitionResumeTimer = null;
+    }
+    if (state.recognition && state.recognitionRunning) {
+      try {
+        // abort() discards buffered audio so the app never transcribes its own TTS output
+        state.recognition.abort();
+      } catch (_) {}
+      state.recognitionRunning = false;
+    }
+  }
+
+  function resumeSpeechRecognitionAfterSelfAudio(delayMs = 450) {
+    if (!state.speechRecSupported || !state.recognition) return;
+    if (!state.voiceCmdEnabled && state.phase !== 'WAITING_FOR_READY') return;
+
+    if (state.recognitionResumeTimer) {
+      clearTimeout(state.recognitionResumeTimer);
+    }
+
+    state.recognitionResumeTimer = setTimeout(() => {
+      if (isSelfAudioActive()) {
+        resumeSpeechRecognitionAfterSelfAudio(300);
+        return;
+      }
+      if (!state.recognitionRunning) {
         try {
-          state.recognition.stop();
+          state.recognition.start();
         } catch (_) {}
       }
-      updateHandsFreeQuickBadge();
-      return;
-    }
+    }, delayMs);
+  }
 
-    if (!state.recognition) {
-      const rec = new SpeechRec();
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.lang = 'en-US';
-
-      rec.onresult = (event) => {
-        if (state.isSpeakingTts) return;
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript.trim().toLowerCase();
-          if (transcript) processVoiceCommand(transcript);
-        }
-      };
-
-      rec.onerror = () => {};
-
-      rec.onend = () => {
-        if (state.voiceCmdEnabled) {
-          setTimeout(() => {
-            if (state.voiceCmdEnabled) {
-              try {
-                rec.start();
-              } catch (_) {}
-            }
-          }, 300);
-        }
-      };
-
-      state.recognition = rec;
-    }
-
-    try {
-      state.recognition.start();
-      state.voiceCmdEnabled = true;
-      el.enableSpeechRecCheckbox.checked = true;
-      updateHandsFreeQuickBadge();
-    } catch (err) {
-      console.warn('Speech recognition start error:', err);
+  function updateHandsFreeQuickBadge() {
+    if (state.phase === 'WAITING_FOR_READY') {
+      el.voiceQuickBadge.textContent = 'Say "Ready"';
+    } else if (state.recognitionRunning) {
+      el.voiceQuickBadge.textContent = 'Voice: ON';
+    } else {
+      el.voiceQuickBadge.textContent = 'Voice: Standby';
     }
   }
 
   let lastVoiceCommandTime = 0;
-  function processVoiceCommand(phrase) {
-    const now = performance.now();
-    if (now - lastVoiceCommandTime < 950) return;
+  function processVoiceCommand(phrase, nowMs = performance.now()) {
+    if (nowMs - lastVoiceCommandTime < 850) return;
+
+    // Ignore exact echo of "shooter ready" if it ever leaked across boundary
+    if (phrase === 'shooter' || phrase.includes('shooter ready')) {
+      return;
+    }
 
     el.voiceHeardBanner.innerHTML = `Heard: <strong>"${phrase}"</strong>`;
 
+    // 1. Stop / Cease command in any active phase
     if (
       phrase.includes('stop') ||
       phrase.includes('cease') ||
       phrase.includes('cancel') ||
       phrase.includes('hold')
     ) {
-      lastVoiceCommandTime = now;
+      lastVoiceCommandTime = nowMs;
       stopDrill('Stopped by voice command');
-    } else if (
-      state.phase === 'IDLE' &&
-      (phrase.includes('start') ||
+      return;
+    }
+
+    // 2. When waiting for shooter to answer "Shooter ready?"
+    if (state.phase === 'WAITING_FOR_READY') {
+      if (nowMs < state.readyListenEligibleAtMs) return;
+
+      // Match "ready" (plus common Android single-word phonetic transcriptions when standing back from phone)
+      const isReadyWord =
         phrase.includes('ready') ||
-        phrase.includes('standby') ||
+        phrase.includes('already') ||
+        phrase.includes('red') ||
+        phrase.includes('read') ||
+        phrase.includes('eddy') ||
+        phrase.includes('yes') ||
+        phrase.includes('yeah') ||
+        phrase.includes('yep') ||
+        phrase.includes('go') ||
+        phrase.includes('start') ||
+        phrase.includes('standby');
+
+      if (isReadyWord) {
+        lastVoiceCommandTime = nowMs;
+        confirmShooterReady(`Heard "${phrase}"`);
+      }
+      return;
+    }
+
+    // 3. When IDLE: allow voice "start" / "ready" / "next"
+    if (state.phase === 'IDLE') {
+      if (
+        phrase.includes('start') ||
+        phrase.includes('ready') ||
         phrase.includes('go') ||
         phrase.includes('repeat') ||
-        phrase.includes('again'))
-    ) {
-      lastVoiceCommandTime = now;
-      startActiveQueuedDrill();
-    } else if (state.phase === 'IDLE' && phrase.includes('next')) {
-      lastVoiceCommandTime = now;
-      stepQueue(1, true);
+        phrase.includes('again')
+      ) {
+        lastVoiceCommandTime = nowMs;
+        startActiveQueuedDrill();
+      } else if (phrase.includes('next')) {
+        lastVoiceCommandTime = nowMs;
+        stepQueue(1, false);
+      }
     }
   }
 
   // ==========================================
-  // 10. DRILL BUILDER & QUEUE MANAGEMENT
+  // 10. DRILL BUILDER & QUEUE MANAGEMENT (WITH REPS)
   // ==========================================
   function getBuilderDrillItem() {
     const drillId = state.builderDrillId;
     const def = DRILL_DEFS[drillId];
+    const reps = Math.max(1, parseInt(el.drillRepsInput.value, 10) || 1);
     const shots = Math.max(1, parseInt(el.shotsCountInput.value, 10) || 1);
     const targetSec = Math.max(0.4, parseFloat(el.targetSecondsInput.value) || 2.0);
     const includeReload = el.includeReloadCheckbox.checked;
@@ -852,6 +976,7 @@
       uid: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       drillId,
       name: def.name,
+      reps,
       shots,
       targetSec: Number(targetSec.toFixed(2)),
       includeReload,
@@ -925,6 +1050,7 @@
         uid: 'sample-1',
         drillId: 'draw_exact',
         name: DRILL_DEFS.draw_exact.name,
+        reps: 3,
         shots: 2,
         targetSec: 3.0,
         includeReload: false,
@@ -939,6 +1065,7 @@
         uid: 'sample-2',
         drillId: 'holster_shoot',
         name: DRILL_DEFS.holster_shoot.name,
+        reps: 3,
         shots: 2,
         targetSec: 2.0,
         includeReload: false,
@@ -953,6 +1080,7 @@
         uid: 'sample-3',
         drillId: 'reload_drill',
         name: DRILL_DEFS.reload_drill.name,
+        reps: 2,
         shots: 2,
         targetSec: 4.5,
         includeReload: true,
@@ -967,6 +1095,7 @@
         uid: 'sample-4',
         drillId: 'turned_holster',
         name: DRILL_DEFS.turned_holster.name,
+        reps: 2,
         shots: 2,
         targetSec: 2.5,
         includeReload: false,
@@ -985,7 +1114,10 @@
       const raw = localStorage.getItem(STORAGE_KEYS.QUEUE);
       const parsed = raw ? JSON.parse(raw) : null;
       if (Array.isArray(parsed) && parsed.length > 0) {
-        state.queue = parsed;
+        state.queue = parsed.map((item) => ({
+          ...item,
+          reps: Math.max(1, parseInt(item.reps, 10) || 1)
+        }));
       } else {
         state.queue = [getBuilderDrillItem()];
       }
@@ -993,6 +1125,7 @@
       state.queue = [getBuilderDrillItem()];
     }
     state.activeQueueIndex = 0;
+    state.activeRepIndex = 1;
     saveQueueToStorage();
     renderQueueUI();
   }
@@ -1010,46 +1143,40 @@
     if (state.activeQueueIndex >= state.queue.length) {
       state.activeQueueIndex = 0;
     }
-    return state.queue[state.activeQueueIndex];
+    const item = state.queue[state.activeQueueIndex];
+    item.reps = Math.max(1, parseInt(item.reps, 10) || 1);
+    if (state.activeRepIndex > item.reps) {
+      state.activeRepIndex = 1;
+    }
+    return item;
   }
 
-  function stepQueue(delta, announceSelection = false) {
+  function stepQueue(delta) {
     if (state.queue.length === 0) return;
     if (state.phase !== 'IDLE') {
       stopDrill('Switched queued drill');
     }
     const len = state.queue.length;
     state.activeQueueIndex = (state.activeQueueIndex + delta + len) % len;
+    state.activeRepIndex = 1;
     renderQueueUI();
-
-    if (announceSelection) {
-      const activeItem = getActiveQueuedDrill();
-      const { fullBriefing } = generateDrillBriefing(activeItem, false);
-      speakCue(`Drill ${state.activeQueueIndex + 1}. ${fullBriefing}`);
-    }
   }
 
   function renderQueueUI() {
-    if (state.queue.length === 0) {
-      state.queue.push(getBuilderDrillItem());
-      state.activeQueueIndex = 0;
-    }
-    if (state.activeQueueIndex >= state.queue.length) {
-      state.activeQueueIndex = state.queue.length - 1;
-    }
-
-    const total = state.queue.length;
+    const activeItem = getActiveQueuedDrill();
+    const totalDrills = state.queue.length;
     const currentIdx = state.activeQueueIndex;
-    const activeItem = state.queue[currentIdx];
+    const currentRep = state.activeRepIndex;
+    const totalReps = activeItem.reps || 1;
     const { fullBriefing } = generateDrillBriefing(activeItem, false);
 
     // Update Badges & Timer Start Page Bar
-    el.queueCountNavBadge.textContent = total;
-    el.queueTotalBadge.textContent = total;
-    el.timerQueueCountLabel.textContent = total;
-    el.queueProgressPill.textContent = `Queue ${currentIdx + 1} / ${total}`;
+    el.queueCountNavBadge.textContent = totalDrills;
+    el.queueTotalBadge.textContent = totalDrills;
+    el.timerQueueCountLabel.textContent = totalDrills;
+    el.queueProgressPill.textContent = `Queue ${currentIdx + 1}/${totalDrills} • Rep ${currentRep}/${totalReps}`;
 
-    el.currentDrillTitleDisplay.textContent = `${currentIdx + 1}. ${activeItem.name}`;
+    el.currentDrillTitleDisplay.textContent = `${currentIdx + 1}. ${activeItem.name} (Rep ${currentRep} of ${totalReps})`;
     el.currentDrillBriefingDisplay.textContent = `"${fullBriefing}"`;
 
     // Update idle Timer metrics preview
@@ -1070,6 +1197,7 @@
     el.drillQueueList.innerHTML = '';
     state.queue.forEach((item, idx) => {
       const isActive = idx === currentIdx;
+      const itemReps = Math.max(1, parseInt(item.reps, 10) || 1);
       const briefing = generateDrillBriefing(item, false);
       const row = document.createElement('div');
       row.className = `queue-item${isActive ? ' active-queue-item' : ''}`;
@@ -1078,11 +1206,16 @@
       row.innerHTML = `
         <div class="queue-item-body">
           <div class="queue-item-title">
-            #${idx + 1} • ${item.name} ${isActive ? '(Active)' : ''}
+            #${idx + 1} • ${item.name} ${isActive ? `(Active: Rep ${currentRep}/${itemReps})` : ''}
           </div>
           <div class="queue-item-brief">"${briefing.fullBriefing}"</div>
         </div>
         <div class="queue-item-actions">
+          <div class="q-reps-ctrl" title="Number of repetitions for this drill">
+            <button type="button" class="q-rep-btn" data-q-rep-delta="-1" data-q-idx="${idx}">-</button>
+            <span class="q-reps-label">${itemReps}x</span>
+            <button type="button" class="q-rep-btn" data-q-rep-delta="1" data-q-idx="${idx}">+</button>
+          </div>
           <button type="button" class="q-icon-btn" data-q-move="-1" data-q-idx="${idx}" title="Move Up">&uarr;</button>
           <button type="button" class="q-icon-btn" data-q-move="1" data-q-idx="${idx}" title="Move Down">&darr;</button>
           <button type="button" class="q-icon-btn q-del" data-q-del="${idx}" title="Remove">&times;</button>
@@ -1094,7 +1227,8 @@
   }
 
   // ==========================================
-  // 11. DRILL EXECUTION ENGINE (WITH PRE-DRILL BRIEFING)
+  // 11. DRILL EXECUTION ENGINE
+  //     (1st-Rep Briefing -> "Shooter ready?" -> Wait for "Ready" -> Standby -> Fire)
   // ==========================================
   function clearAllDrillTimers() {
     state.timers.forEach((id) => clearTimeout(id));
@@ -1112,6 +1246,12 @@
   }
 
   async function startActiveQueuedDrill() {
+    // If user clicks Start while waiting for "Ready", treat the button click as manual "Ready!" confirmation
+    if (state.phase === 'WAITING_FOR_READY') {
+      confirmShooterReady('Manual Button Confirm');
+      return;
+    }
+
     clearAllDrillTimers();
     ensureAudioContext();
     if (!state.wakeLockActive) {
@@ -1129,6 +1269,8 @@
 
     state.activeRunConfig = {
       ...activeItem,
+      repNumber: state.activeRepIndex,
+      totalReps: activeItem.reps || 1,
       totalShots,
       resolvedBriefing
     };
@@ -1139,7 +1281,7 @@
     state.shots = [];
     state.prematureShots = 0;
     state.reloadCalled = false;
-    state.activeContextLabel = resolvedBriefing.shooterState;
+    state.activeContextLabel = `${resolvedBriefing.shooterState} (Rep ${state.activeRepIndex}/${activeItem.reps || 1})`;
 
     // Reset Timer UI
     el.clockDisplay.innerHTML = `0.00<span class="clock-unit">s</span>`;
@@ -1150,35 +1292,97 @@
     el.parDeltaDisplay.style.color = 'var(--text-main)';
     el.liveSplitsStrip.innerHTML = `<span class="splits-placeholder">Waiting for signal...</span>`;
     el.currentDrillBriefingDisplay.textContent = `"${resolvedBriefing.fullBriefing}"`;
+    renderQueueUI();
 
     el.startDrillBtn.disabled = true;
+    el.startDrillBtn.textContent = 'START DRILL';
     el.manualShotBtn.disabled = false;
     el.stopDrillBtn.disabled = false;
 
-    const shouldAnnounceBriefing = el.announceDrillExplanationCheckbox.checked;
+    // REQUIREMENT: When a drill is done multiple times, the description is ONLY given the first time (Rep 1)!
+    const isFirstRepOfThisDrill = state.activeRepIndex === 1;
+    const shouldAnnounceBriefing =
+      isFirstRepOfThisDrill && el.announceDrillExplanationCheckbox.checked;
 
     if (shouldAnnounceBriefing) {
-      setDrillPhaseUI('BRIEFING', 'DRILL BRIEFING');
+      setDrillPhaseUI('BRIEFING', `REP 1/${state.activeRunConfig.totalReps} BRIEFING`);
       el.activeCueBanner.textContent = resolvedBriefing.fullBriefing;
       speakCue(resolvedBriefing.fullBriefing, {
         onEnd: () => {
           if (state.phase !== 'BRIEFING') return;
           scheduleTimeout(() => {
             if (state.phase !== 'BRIEFING') return;
-            proceedAfterBriefing();
-          }, 350);
+            askShooterReadyGate();
+          }, 300);
         }
       });
     } else {
-      proceedAfterBriefing();
+      // Rep 2+ (or briefing unchecked): skip description and ask "Shooter ready?" directly
+      askShooterReadyGate();
     }
   }
 
-  function proceedAfterBriefing() {
+  /**
+   * Asks "Shooter ready?" and waits until the shooter replies "Ready" (or taps Ready button)
+   */
+  function askShooterReadyGate() {
     const cfg = state.activeRunConfig;
     if (!cfg) return;
 
-    setDrillPhaseUI('COUNTDOWN', 'PREPARING / STANDBY');
+    if (!el.requireReadyVoiceCheckbox.checked) {
+      proceedAfterReadyConfirmed();
+      return;
+    }
+
+    setDrillPhaseUI(
+      'ASKING_READY',
+      `REP ${cfg.repNumber}/${cfg.totalReps} • ASKING READY`
+    );
+    el.activeCueBanner.textContent = 'Asking: "Shooter ready?"...';
+
+    speakCue('Shooter ready?', {
+      onEnd: () => {
+        if (state.phase !== 'ASKING_READY') return;
+
+        // Wait 450ms after TTS ends so phone speaker reverb cannot self-trigger
+        const nowMs = performance.now();
+        state.readyListenEligibleAtMs = nowMs + 450;
+        state.ignoreVoiceUntilMs = nowMs + 450;
+        state.muteShotDetectionUntilMs = nowMs + 450;
+
+        setDrillPhaseUI(
+          'WAITING_FOR_READY',
+          `REP ${cfg.repNumber}/${cfg.totalReps} • SAY "READY"`
+        );
+        el.activeCueBanner.textContent =
+          'Listening for "READY"... (Say "Ready" or tap button below)';
+
+        // Enable primary button as a 1-tap "I'M READY" fallback as well
+        el.startDrillBtn.disabled = false;
+        el.startDrillBtn.textContent = 'SAY "READY" (OR TAP)';
+
+        updateHandsFreeQuickBadge();
+        resumeSpeechRecognitionAfterSelfAudio(420);
+      }
+    });
+  }
+
+  function confirmShooterReady(triggerSource = 'Voice') {
+    if (state.phase !== 'WAITING_FOR_READY') return;
+
+    el.startDrillBtn.disabled = true;
+    el.startDrillBtn.textContent = 'START DRILL';
+    updateHandsFreeQuickBadge();
+
+    el.voiceHeardBanner.innerHTML = `Confirmed Ready (${triggerSource}) &rarr; <strong>Starting Drill!</strong>`;
+    proceedAfterReadyConfirmed();
+  }
+
+  function proceedAfterReadyConfirmed() {
+    const cfg = state.activeRunConfig;
+    if (!cfg) return;
+
+    setDrillPhaseUI('COUNTDOWN', `REP ${cfg.repNumber}/${cfg.totalReps} • STANDBY`);
 
     if (cfg.drillId === 'walk_draw_shoot') {
       runWalkTwoStageDrill(cfg);
@@ -1192,15 +1396,10 @@
       el.activeCueBanner.textContent = `Standby...`;
       scheduleTimeout(() => beginLiveFirePhase(), 1000);
     } else {
-      el.activeCueBanner.textContent = 'Shooter Ready... Standby';
-      speakCue('Ready. Standby.', {
-        onEnd: () => {
-          if (state.phase !== 'COUNTDOWN') return;
-          const randomDelayMs = Math.floor(1500 + Math.random() * 2000);
-          el.activeCueBanner.textContent = 'Hold... Waiting for Signal...';
-          scheduleTimeout(() => beginLiveFirePhase(), randomDelayMs);
-        }
-      });
+      // Random Standby Delay (1.5s - 3.5s) -> Fire!
+      const randomDelayMs = Math.floor(1500 + Math.random() * 2000);
+      el.activeCueBanner.textContent = 'Standby... Waiting for Signal...';
+      scheduleTimeout(() => beginLiveFirePhase(), randomDelayMs);
     }
   }
 
@@ -1220,14 +1419,9 @@
       if (immediateFireAfterOne) {
         beginLiveFirePhase();
       } else {
-        el.activeCueBanner.textContent = 'Ready... Standby...';
-        speakCue('Ready', {
-          onEnd: () => {
-            if (state.phase !== 'COUNTDOWN') return;
-            const randomDelayMs = Math.floor(1200 + Math.random() * 2000);
-            scheduleTimeout(() => beginLiveFirePhase(), randomDelayMs);
-          }
-        });
+        el.activeCueBanner.textContent = 'Standby...';
+        const randomDelayMs = Math.floor(1200 + Math.random() * 2000);
+        scheduleTimeout(() => beginLiveFirePhase(), randomDelayMs);
       }
     }, 5000);
   }
@@ -1283,14 +1477,14 @@
 
     if (cfg.drillId === 'contact_callout') {
       voiceSignal = resolveContactCallout();
-      state.activeContextLabel = `${cfg.resolvedBriefing.shooterState} • ${voiceSignal}`;
+      state.activeContextLabel = `${cfg.resolvedBriefing.shooterState} • ${voiceSignal} (Rep ${cfg.repNumber}/${cfg.totalReps})`;
     } else if (cfg.drillId === 'turned_holster') {
       voiceSignal = 'Turn and Fire!';
     } else if (cfg.drillId === 'draw_exact') {
       voiceSignal = cfg.targetSec >= 1.5 ? 'Draw!' : 'Fire!';
     }
 
-    setDrillPhaseUI('LIVE', 'LIVE FIRE — SHOOT!');
+    setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • LIVE FIRE!`);
     el.activeCueBanner.textContent = `SIGNAL: ${voiceSignal.toUpperCase()}`;
     el.liveSplitsStrip.innerHTML = '';
 
@@ -1427,15 +1621,16 @@
           ? 'var(--accent-green)'
           : 'var(--accent-amber)';
 
-    setDrillPhaseUI('IDLE', 'DRILL COMPLETE');
+    setDrillPhaseUI('IDLE', `REP ${cfg.repNumber}/${cfg.totalReps} COMPLETE`);
 
     if (cfg.drillId === 'draw_exact') {
-      el.activeCueBanner.textContent = `Target: ${targetSec.toFixed(2)}s | Actual: ${totalSec.toFixed(2)}s | Delta: ${deltaSign}${deltaSec.toFixed(2)}s`;
+      el.activeCueBanner.textContent = `Rep ${cfg.repNumber}/${cfg.totalReps} Done! Target: ${targetSec.toFixed(2)}s | Actual: ${totalSec.toFixed(2)}s (${deltaSign}${deltaSec.toFixed(2)}s)`;
     } else {
-      el.activeCueBanner.textContent = `Complete! Total: ${totalSec.toFixed(2)}s | 1st Shot: ${firstShotSec.toFixed(2)}s`;
+      el.activeCueBanner.textContent = `Rep ${cfg.repNumber}/${cfg.totalReps} Done! Total: ${totalSec.toFixed(2)}s | 1st Shot: ${firstShotSec.toFixed(2)}s`;
     }
 
     el.startDrillBtn.disabled = false;
+    el.startDrillBtn.textContent = 'START DRILL';
     el.manualShotBtn.disabled = true;
     el.stopDrillBtn.disabled = true;
 
@@ -1455,18 +1650,37 @@
       shots: state.shots
     });
 
-    // Advance to next item in queue if enabled
-    if (el.autoAdvanceQueueCheckbox.checked && state.queue.length > 1) {
-      state.activeQueueIndex = (state.activeQueueIndex + 1) % state.queue.length;
+    // Advance Rep Counter or Advance to Next Drill in Queue
+    const activeItem = getActiveQueuedDrill();
+    const totalRepsForDrill = activeItem.reps || 1;
+    let hasMoreInSet = false;
+
+    if (el.autoAdvanceQueueCheckbox.checked) {
+      if (state.activeRepIndex < totalRepsForDrill) {
+        // Stay on same drill, increment rep (next rep will skip description & go straight to "Shooter ready?")
+        state.activeRepIndex++;
+        hasMoreInSet = true;
+      } else {
+        // Finished all reps of this drill! Move to next drill in queue (resetting rep to 1 so new drill gets explained)
+        state.activeRepIndex = 1;
+        if (state.activeQueueIndex + 1 < state.queue.length) {
+          state.activeQueueIndex++;
+          hasMoreInSet = true;
+        } else {
+          // Completed entire queue; wrap back to first drill
+          state.activeQueueIndex = 0;
+          hasMoreInSet = false;
+        }
+      }
       renderQueueUI();
     }
 
-    // Auto-start next run if Hands-Free Auto-Repeat is enabled
-    if (el.autoRepeatCheckbox.checked) {
-      const restSec = Math.max(3, parseInt(el.autoRepeatSecInput.value, 10) || 8);
-      el.activeCueBanner.textContent += ` • Next drill in ${restSec}s...`;
+    // Automatically prompt the next rep / drill after re-holster pause (where it asks "Shooter ready?")
+    if (el.autoPromptReadyCheckbox.checked && hasMoreInSet) {
+      const restSec = Math.max(2, parseInt(el.autoRepeatSecInput.value, 10) || 4);
+      el.activeCueBanner.textContent += ` • Next rep in ${restSec}s...`;
       scheduleTimeout(() => {
-        if (state.phase === 'IDLE' && el.autoRepeatCheckbox.checked) {
+        if (state.phase === 'IDLE' && el.autoPromptReadyCheckbox.checked) {
           startActiveQueuedDrill();
         }
       }, restSec * 1000);
@@ -1489,16 +1703,25 @@
     setDrillPhaseUI('IDLE', 'STANDBY / IDLE');
     el.activeCueBanner.textContent = reason;
     el.startDrillBtn.disabled = false;
+    el.startDrillBtn.textContent = 'START DRILL';
     el.manualShotBtn.disabled = true;
     el.stopDrillBtn.disabled = true;
+    updateHandsFreeQuickBadge();
   }
 
   function setDrillPhaseUI(phase, badgeText) {
     state.phase = phase;
     el.drillPhaseBadge.textContent = badgeText;
-    el.timerCard.classList.remove('phase-standby', 'phase-live');
-    if (
+    el.timerCard.classList.remove(
+      'phase-standby',
+      'phase-waiting-ready',
+      'phase-live'
+    );
+    if (phase === 'WAITING_FOR_READY') {
+      el.timerCard.classList.add('phase-waiting-ready');
+    } else if (
       phase === 'BRIEFING' ||
+      phase === 'ASKING_READY' ||
       phase === 'COUNTDOWN' ||
       phase === 'WALKING' ||
       phase === 'DRAWN_WAITING'
@@ -1616,7 +1839,7 @@
     const headers = [
       'Timestamp',
       'Drill',
-      'ShooterState',
+      'ShooterStateAndRep',
       'TotalShots',
       'FirstShotSec',
       'TotalSec',
@@ -1682,8 +1905,8 @@
     });
 
     // Timer View Queue Navigation
-    el.prevQueueBtn.addEventListener('click', () => stepQueue(-1, false));
-    el.nextQueueBtn.addEventListener('click', () => stepQueue(1, false));
+    el.prevQueueBtn.addEventListener('click', () => stepQueue(-1));
+    el.nextQueueBtn.addEventListener('click', () => stepQueue(1));
     el.openDrillsMenuBtn.addEventListener('click', () => switchView('view-drills'));
 
     // Primary Timer Controls
@@ -1722,6 +1945,7 @@
     });
 
     [
+      el.drillRepsInput,
       el.targetSecondsInput,
       el.shotsCountInput,
       el.postReloadShotsInput,
@@ -1747,6 +1971,7 @@
       const newItem = getBuilderDrillItem();
       state.queue.push(newItem);
       state.activeQueueIndex = state.queue.length - 1;
+      state.activeRepIndex = 1;
       saveQueueToStorage();
       renderQueueUI();
     });
@@ -1755,13 +1980,31 @@
       const newItem = getBuilderDrillItem();
       state.queue = [newItem];
       state.activeQueueIndex = 0;
+      state.activeRepIndex = 1;
       saveQueueToStorage();
       renderQueueUI();
       switchView('view-timer');
     });
 
-    // Queue List Actions (Select, Move Up/Down, Delete)
+    // Queue List Actions (Adjust Reps, Move Up/Down, Delete, Select)
     el.drillQueueList.addEventListener('click', (e) => {
+      const repBtn = e.target.closest('[data-q-rep-delta]');
+      if (repBtn) {
+        e.stopPropagation();
+        const idx = parseInt(repBtn.dataset.qIdx, 10);
+        const delta = parseInt(repBtn.dataset.qRepDelta, 10);
+        if (state.queue[idx]) {
+          const currentReps = Math.max(1, parseInt(state.queue[idx].reps, 10) || 1);
+          state.queue[idx].reps = Math.min(50, Math.max(1, currentReps + delta));
+          if (idx === state.activeQueueIndex && state.activeRepIndex > state.queue[idx].reps) {
+            state.activeRepIndex = state.queue[idx].reps;
+          }
+          saveQueueToStorage();
+          renderQueueUI();
+        }
+        return;
+      }
+
       const moveBtn = e.target.closest('[data-q-move]');
       if (moveBtn) {
         e.stopPropagation();
@@ -1790,6 +2033,7 @@
         if (state.activeQueueIndex >= state.queue.length) {
           state.activeQueueIndex = state.queue.length - 1;
         }
+        state.activeRepIndex = 1;
         saveQueueToStorage();
         renderQueueUI();
         return;
@@ -1798,6 +2042,7 @@
       const row = e.target.closest('[data-queue-idx]');
       if (row) {
         state.activeQueueIndex = parseInt(row.dataset.queueIdx, 10) || 0;
+        state.activeRepIndex = 1;
         renderQueueUI();
         switchView('view-timer');
       }
@@ -1806,6 +2051,7 @@
     el.loadSampleQueueBtn.addEventListener('click', () => {
       state.queue = createDefaultSampleQueue();
       state.activeQueueIndex = 0;
+      state.activeRepIndex = 1;
       saveQueueToStorage();
       renderQueueUI();
     });
@@ -1813,14 +2059,15 @@
     el.clearQueueBtn.addEventListener('click', () => {
       state.queue = [getBuilderDrillItem()];
       state.activeQueueIndex = 0;
+      state.activeRepIndex = 1;
       saveQueueToStorage();
       renderQueueUI();
     });
 
-    el.autoRepeatCheckbox.addEventListener('change', () => {
+    el.autoPromptReadyCheckbox.addEventListener('change', () => {
       el.paramAutoRepeatDelayWrap.classList.toggle(
         'hidden',
-        !el.autoRepeatCheckbox.checked
+        !el.autoPromptReadyCheckbox.checked
       );
     });
 
@@ -1842,9 +2089,14 @@
     el.testBeepBtn.addEventListener('click', () => playTimerBeep(240));
 
     el.enableSpeechRecCheckbox.addEventListener('change', () => {
-      toggleVoiceCommands(el.enableSpeechRecCheckbox.checked);
+      state.voiceCmdEnabled = el.enableSpeechRecCheckbox.checked;
+      if (state.voiceCmdEnabled) {
+        resumeSpeechRecognitionAfterSelfAudio(100);
+      } else {
+        suspendSpeechRecognitionForSelfAudio();
+      }
+      updateHandsFreeQuickBadge();
     });
-    el.enableClapStartCheckbox.addEventListener('change', updateHandsFreeQuickBadge);
 
     el.ttsRateSlider.addEventListener('input', () => {
       el.ttsRateVal.textContent = `${parseFloat(el.ttsRateSlider.value).toFixed(2)}x`;
@@ -1884,6 +2136,7 @@
   // ==========================================
   function init() {
     initPWA();
+    initSpeechRecognition();
     bindEvents();
     selectBuilderDrillTile('draw_exact');
     loadQueueFromStorage();

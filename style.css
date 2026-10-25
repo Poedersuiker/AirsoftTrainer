@@ -399,6 +399,11 @@ body {
   box-shadow: 0 0 24px rgba(245, 158, 11, 0.2);
 }
 
+.timer-card.phase-waiting-ready {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 26px rgba(56, 189, 248, 0.28);
+}
+
 .timer-card.phase-live {
   border-color: var(--accent-green);
   box-shadow: 0 0 28px rgba(16, 185, 129, 0.28);
@@ -420,6 +425,12 @@ body {
   background: rgba(245, 158, 11, 0.2);
   color: #fde68a;
   border-color: var(--accent-amber);
+}
+
+.phase-waiting-ready .drill-phase-badge {
+  background: rgba(56, 189, 248, 0.22);
+  color: #bae6fd;
+  border-color: var(--accent-blue);
 }
 
 .phase-live .drill-phase-badge {
@@ -735,6 +746,40 @@ button {
   display: flex;
   align-items: center;
   gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.q-reps-ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0.12rem 0.25rem;
+  margin-right: 0.2rem;
+}
+
+.q-reps-label {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: #fde68a;
+  min-width: 2.2rem;
+  text-align: center;
+}
+
+.q-rep-btn {
+  background: var(--bg-card-elevated);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 800;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
 }
 
 .q-icon-btn {

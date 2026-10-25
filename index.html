@@ -36,7 +36,7 @@
           </div>
           <div class="mini-meter-sub">
             <span id="peakValueLabel">0%</span>
-            <span id="voiceQuickBadge" class="voice-mini-tag">Clap: ON</span>
+            <span id="voiceQuickBadge" class="voice-mini-tag">Say "Ready"</span>
           </div>
         </div>
       </div>
@@ -74,7 +74,7 @@
         </button>
         <button type="button" class="drawer-link" data-view="view-drills">
           <span class="drawer-link-title">Drills &amp; Queue (<span id="queueCountNavBadge">1</span>)</span>
-          <span class="drawer-link-sub">Configure drills &amp; build a set to work through</span>
+          <span class="drawer-link-sub">Configure drills, reps &amp; training queue</span>
         </button>
         <button type="button" class="drawer-link" data-view="view-settings">
           <span class="drawer-link-title">Settings &amp; Audio</span>
@@ -97,10 +97,10 @@
         <div class="timer-card" id="timerCard">
           <div class="timer-card-top">
             <div class="drill-phase-badge" id="drillPhaseBadge">STANDBY / IDLE</div>
-            <span class="queue-progress-pill" id="queueProgressPill">Queue 1 / 1</span>
+            <span class="queue-progress-pill" id="queueProgressPill">Queue 1/1 • Rep 1/3</span>
           </div>
 
-          <div class="active-cue-banner" id="activeCueBanner">Press START (or say "Start" / double-clap)</div>
+          <div class="active-cue-banner" id="activeCueBanner">Press START DRILL to begin briefing</div>
 
           <div class="clock-display" id="clockDisplay">0.00<span class="clock-unit">s</span></div>
 
@@ -146,10 +146,10 @@
         <div class="active-drill-bar">
           <div class="active-drill-info">
             <div class="active-drill-header">
-              <span class="active-drill-name" id="currentDrillTitleDisplay">Exact #s Paced Draw</span>
-              <label class="inline-brief-toggle" title="Announce shooter state and action before starting">
+              <span class="active-drill-name" id="currentDrillTitleDisplay">1. Exact #s Paced Draw (Rep 1 of 3)</span>
+              <label class="inline-brief-toggle" title="Announce shooter state and action on the 1st rep of each drill">
                 <input type="checkbox" id="quickExplainToggle" checked />
-                <span>Voice Briefing</span>
+                <span>1st-Rep Briefing</span>
               </label>
             </div>
             <p class="active-drill-briefing" id="currentDrillBriefingDisplay">
@@ -175,30 +175,30 @@
         <div class="card">
           <div class="card-header">
             <h2>Drill Queue (Training Set)</h2>
-            <span class="badge-subtle"><span id="queueTotalBadge">1</span> Queued</span>
+            <span class="badge-subtle"><span id="queueTotalBadge">1</span> Drills Queued</span>
           </div>
           <p class="helper-text">
-            Queue multiple drills to work through in sequence. Tap any queued item to jump to it.
+            Set how many repetitions (<strong>Reps</strong>) to run for each drill. When a drill is repeated multiple times, its spoken description is only announced on <strong>Rep 1</strong>, followed by <em>"Shooter ready?"</em> on every rep.
           </p>
 
           <div class="params-grid" style="margin-bottom: 0.75rem;">
             <div class="param-item">
               <label class="toggle-row" for="autoAdvanceQueueCheckbox">
-                <span>Advance to Next Queued Drill After Each Run</span>
+                <span>Automatically Advance Through Reps &amp; Queue</span>
                 <input type="checkbox" id="autoAdvanceQueueCheckbox" checked />
               </label>
             </div>
             <div class="param-item">
-              <label class="toggle-row" for="autoRepeatCheckbox">
-                <span>Auto-Start Next Run After Rest Timer (Hands-Free)</span>
-                <input type="checkbox" id="autoRepeatCheckbox" />
+              <label class="toggle-row" for="autoPromptReadyCheckbox">
+                <span>Auto-Prompt Next Rep After Run (Hands-Free Set)</span>
+                <input type="checkbox" id="autoPromptReadyCheckbox" checked />
               </label>
             </div>
-            <div class="param-item hidden" id="paramAutoRepeatDelayWrap">
-              <label for="autoRepeatSecInput">Rest / Re-Holster Time Between Runs (sec)</label>
+            <div class="param-item" id="paramAutoRepeatDelayWrap">
+              <label for="autoRepeatSecInput">Re-Holster / Reset Pause Before Next Rep (sec)</label>
               <div class="stepper-control">
                 <button type="button" class="step-btn" data-step-target="autoRepeatSecInput" data-step="-1">-</button>
-                <input type="number" id="autoRepeatSecInput" min="3" max="30" step="1" value="8" />
+                <input type="number" id="autoRepeatSecInput" min="2" max="30" step="1" value="4" />
                 <button type="button" class="step-btn" data-step-target="autoRepeatSecInput" data-step="1">+</button>
               </div>
             </div>
@@ -264,7 +264,7 @@
           <!-- Spoken Briefing Preview Box -->
           <div class="drill-summary-box" id="builderBriefingPreviewBox">
             <div class="briefing-preview-header">
-              <strong>Spoken Briefing Preview (Shooter State &rarr; Action):</strong>
+              <strong>1st-Rep Spoken Briefing Preview (State &rarr; Action):</strong>
               <button type="button" id="testBriefingSpeakBtn" class="chip">Test Voice</button>
             </div>
             <div id="builderBriefingText" class="briefing-quote">
@@ -274,6 +274,16 @@
 
           <!-- Dynamic Drill Parameters -->
           <div class="params-grid">
+            <!-- Number of Repetitions for this Queued Drill -->
+            <div class="param-item" id="paramRepsWrap">
+              <label for="drillRepsInput">How Many Times to Repeat This Drill (# Reps)</label>
+              <div class="stepper-control">
+                <button type="button" class="step-btn" data-step-target="drillRepsInput" data-step="-1">-</button>
+                <input type="number" id="drillRepsInput" min="1" max="50" step="1" value="3" />
+                <button type="button" class="step-btn" data-step-target="drillRepsInput" data-step="1">+</button>
+              </div>
+            </div>
+
             <!-- Target / Par Time -->
             <div class="param-item" id="paramTargetSecondsWrap">
               <label for="targetSecondsInput" id="targetSecondsLabel">Exact Draw Time (# sec)</label>
@@ -391,25 +401,32 @@
       <section id="view-settings" class="view-panel">
         <div class="card">
           <div class="card-header">
-            <h2>Drill Briefing &amp; Countdown</h2>
-            <span class="badge-subtle">Pre-Drill Voice</span>
+            <h2>Drill Briefing &amp; "Shooter Ready?" Prompt</h2>
+            <span class="badge-subtle">Pre-Drill Flow</span>
           </div>
 
           <div class="params-grid">
             <div class="param-item">
               <label class="toggle-row" for="announceDrillExplanationCheckbox">
-                <span>Announce Drill Explanation Before Starting</span>
+                <span>Announce Drill Explanation Before 1st Rep</span>
                 <input type="checkbox" id="announceDrillExplanationCheckbox" checked />
               </label>
             </div>
 
             <div class="param-item">
-              <label for="countdownModeSelect">Start Countdown After Briefing</label>
+              <label class="toggle-row" for="requireReadyVoiceCheckbox">
+                <span>Ask "Shooter ready?" &amp; Wait for "Ready" Reply</span>
+                <input type="checkbox" id="requireReadyVoiceCheckbox" checked />
+              </label>
+            </div>
+
+            <div class="param-item">
+              <label for="countdownModeSelect">After Shooter Says "Ready"</label>
               <select id="countdownModeSelect">
-                <option value="random_standby">"Ready" + Random Standby (1.5–3.5s)</option>
-                <option value="countdown_5">"5, 4, 3, 2, 1, Ready" + Random Delay</option>
+                <option value="random_standby">Random Standby Delay (1.5–3.5s) &rarr; Fire!</option>
+                <option value="countdown_5">"5, 4, 3, 2, 1" + Random Delay &rarr; Fire!</option>
                 <option value="countdown_5_instant">"5, 4, 3, 2, 1, Fire!" (Exact Cadence)</option>
-                <option value="instant">Immediate Signal After Briefing (1.0s)</option>
+                <option value="instant">Short Standby (1.0s) &rarr; Fire!</option>
               </select>
             </div>
           </div>
@@ -421,7 +438,7 @@
             <span class="badge-subtle">Web Audio Transient Detector</span>
           </div>
           <p class="helper-text">
-            Tuned for Gas Blowback (GBB) and CO2 airsoft pistols. Noise suppression is disabled so sharp muzzle/slide transients register cleanly.
+            Tuned for Gas Blowback (GBB) and CO2 airsoft pistols. The microphone automatically mutes while the app is speaking or beeping so it never triggers on its own sounds.
           </p>
 
           <div class="control-group">
@@ -458,27 +475,30 @@
 
         <div class="card">
           <div class="card-header">
-            <h2>Hands-Free Control (Voice &amp; Double-Clap)</h2>
-            <span class="badge-subtle">No Touch Required</span>
+            <h2>Hands-Free Voice Recognition</h2>
+            <span class="badge-subtle">Anti-Self-Trigger Protected</span>
           </div>
+          <p class="helper-text">
+            When the app asks <em>"Shooter ready?"</em>, it pauses listening while its own speaker is active and only listens after its voice finishes.
+          </p>
 
           <div class="params-grid">
             <div class="param-item">
               <label class="toggle-row" for="enableSpeechRecCheckbox">
-                <span>Voice Commands ("Ready", "Start", "Stop", "Next")</span>
-                <input type="checkbox" id="enableSpeechRecCheckbox" />
+                <span>Always-On Voice Commands ("Start", "Ready", "Stop")</span>
+                <input type="checkbox" id="enableSpeechRecCheckbox" checked />
               </label>
             </div>
             <div class="param-item">
-              <label class="toggle-row" for="enableClapStartCheckbox">
-                <span>Offline Double-Clap / Shout to Start When Idle</span>
-                <input type="checkbox" id="enableClapStartCheckbox" checked />
+              <label class="toggle-row" for="enableAcousticReadyFallbackCheckbox">
+                <span>Offline Voice/Loud "Ready" Fallback (If Offline TTS/Speech Fails)</span>
+                <input type="checkbox" id="enableAcousticReadyFallbackCheckbox" checked />
               </label>
             </div>
           </div>
 
           <div class="voice-heard-banner" id="voiceHeardBanner" style="margin-top:0.65rem;">
-            Hands-free cues: say <strong>"Ready"</strong>, <strong>"Start"</strong>, <strong>"Stop"</strong>, <strong>"Next"</strong> (or double-clap)
+            Voice status: Ready — say <strong>"Ready"</strong> when prompted!
           </div>
         </div>
 
@@ -508,15 +528,15 @@
             </div>
 
             <div class="param-item">
-              <label for="ttsRateSlider">Voice Callout Speed: <strong id="ttsRateVal">1.10x</strong></label>
-              <input type="range" id="ttsRateSlider" min="0.8" max="1.5" step="0.05" value="1.10" />
+              <label for="ttsRateSlider">Voice Callout Speed: <strong id="ttsRateVal">1.05x</strong></label>
+              <input type="range" id="ttsRateSlider" min="0.8" max="1.5" step="0.05" value="1.05" />
             </div>
           </div>
 
           <h3 class="sub-heading">Tap to Test Any Audio Callout</h3>
           <div class="soundboard-grid" id="soundboardGrid">
             <button type="button" class="sb-btn" data-say="5, 4, 3, 2, 1">5-4-3-2-1</button>
-            <button type="button" class="sb-btn" data-say="Ready">Ready</button>
+            <button type="button" class="sb-btn" data-say="Shooter ready?">Shooter ready?</button>
             <button type="button" class="sb-btn" data-say="Standby">Standby</button>
             <button type="button" class="sb-btn" data-say="Draw!">Draw!</button>
             <button type="button" class="sb-btn" data-say="Fire!" data-beep="true">Fire! + Beep</button>
