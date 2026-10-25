@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Airsoft Shot Timer &amp; Drill Trainer</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Tactical Header & Hardware Status Bar -->
+    <header class="app-header">
+      <div class="header-top">
+        <div class="brand">
+          <img src="icon.svg" alt="Reticle" class="brand-icon" />
+          <div>
+            <h1>AIRSOFT TRAINER</h1>
+            <span class="subtitle" id="offlineStatusText">Offline PWA Ready</span>
+          </div>
+        </div>
+        <button id="installPwaBtn" class="btn-install hidden" title="Install App for Offline Use">
+          + Install App
+        </button>
+      </div>
+
+      <!-- Status Pills: Screen Wake Lock, Shot Mic, Hands-Free Voice -->
+      <div class="status-pills">
+        <button id="wakeLockBtn" class="pill pill-warn" type="button" title="Toggle Screen Wake Lock">
+          <span class="pill-dot"></span>
+          <span id="wakeLockText">Screen Lock: Tap to Arm</span>
+        </button>
+        <button id="micToggleBtn" class="pill pill-off" type="button" title="Toggle GBB Shot Microphone">
+          <span class="pill-dot"></span>
+          <span id="micStatusText">Shot Mic: OFF</span>
+        </button>
+        <button id="voiceToggleBtn" class="pill pill-off" type="button" title="Toggle Hands-Free Voice Commands">
+          <span class="pill-dot"></span>
+          <span id="voiceStatusText">Voice Cmd: OFF</span>
+        </button>
+      </div>
+
+      <!-- Live Acoustic Meter for GBB Shots -->
+      <div class="meter-wrapper" id="meterWrapper">
+        <div class="meter-labels">
+          <span>GBB Acoustic Peak: <strong id="peakValueLabel">0%</strong></span>
+          <span>Trigger Threshold: <strong id="thresholdValueLabel">62%</strong></span>
+        </div>
+        <div class="meter-track" id="meterTrack" title="Tap or drag slider in Audio settings to adjust threshold">
+          <div class="meter-fill" id="meterFill"></div>
+          <div class="meter-peak-hold" id="meterPeakHold"></div>
+          <div class="meter-threshold-line" id="meterThresholdLine" style="left: 62%;"></div>
+        </div>
+        <div class="voice-heard-banner" id="voiceHeardBanner">
+          Hands-free cues: say <strong>"Ready"</strong>, <strong>"Start"</strong>, <strong>"Stop"</strong>, <strong>"Repeat"</strong> (or double-clap)
+        </div>
+      </div>
+    </header>
+
+    <!-- Navigation Tabs -->
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="tab-trainer" type="button">Timer &amp; Drills</button>
+      <button class="tab-btn" data-tab="tab-audio" type="button">Mic &amp; Audio</button>
+      <button class="tab-btn" data-tab="tab-logs" type="button">Logs (<span id="logCountBadge">0</span>)</button>
+    </nav>
+
+    <!-- MAIN CONTENT AREA -->
+    <main class="main-content">
+
+      <!-- TAB 1: TIMER & DRILLS -->
+      <section id="tab-trainer" class="tab-panel active">
+        <!-- Active Drill Display & Timer Readout -->
+        <div class="timer-card" id="timerCard">
+          <div class="drill-phase-badge" id="drillPhaseBadge">STANDBY / IDLE</div>
+          <div class="active-cue-banner" id="activeCueBanner">Select a drill &amp; press START (or say "Start")</div>
+
+          <div class="clock-display" id="clockDisplay">0.00<span class="clock-unit">s</span></div>
+
+          <div class="timer-metrics-grid">
+            <div class="metric-box">
+              <span class="metric-label">SHOTS</span>
+              <span class="metric-value" id="shotsCounterDisplay">0 / 2</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">1ST SHOT (DRAW)</span>
+              <span class="metric-value" id="firstShotDisplay">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">LAST SPLIT</span>
+              <span class="metric-value" id="lastSplitDisplay">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label" id="parOrTargetLabel">PAR / TARGET</span>
+              <span class="metric-value" id="parDeltaDisplay">--</span>
+            </div>
+          </div>
+
+          <!-- Live Shot Splits Chips -->
+          <div class="splits-strip" id="liveSplitsStrip">
+            <span class="splits-placeholder">Shot splits will appear here...</span>
+          </div>
+
+          <!-- Primary Action Controls -->
+          <div class="primary-controls">
+            <button id="startDrillBtn" class="btn-primary btn-start" type="button">
+              START DRILL
+            </button>
+            <button id="manualShotBtn" class="btn-secondary btn-shot" type="button" disabled>
+              TAP SHOT
+            </button>
+            <button id="stopDrillBtn" class="btn-danger btn-stop" type="button" disabled>
+              STOP
+            </button>
+          </div>
+        </div>
+
+        <!-- Drill Selector & Configuration -->
+        <div class="card">
+          <div class="card-header">
+            <h2>Select Training Drill</h2>
+            <span class="badge-subtle" id="drillCategoryTag">Dexterity &amp; Speed</span>
+          </div>
+
+          <!-- Quick Drill Preset Pills -->
+          <div class="drill-grid" id="drillSelectorGrid">
+            <button type="button" class="drill-tile active" data-drill="draw_exact">
+              <span class="drill-title">Exact #s Draw</span>
+              <span class="drill-desc">Dexterity paced draw in # sec (5s to max speed)</span>
+            </button>
+            <button type="button" class="drill-tile" data-drill="holster_shoot">
+              <span class="drill-title">Holster Shoot #</span>
+              <span class="drill-desc">Draw from holster &amp; fire # shots on signal</span>
+            </button>
+            <button type="button" class="drill-tile" data-drill="high_ready">
+              <span class="drill-title">High Ready #</span>
+              <span class="drill-desc">Present from high ready &amp; fire # shots</span>
+            </button>
+            <button type="button" class="drill-tile" data-drill="low_ready">
+              <span class="drill-title">Low Ready #</span>
+              <span class="drill-desc">Snap up from low ready &amp; fire # shots</span>
+            </button>
+            <button type="button" class="drill-tile" data-drill="reload_drill">
+              <span class="drill-title">Shoot # + Reload + #</span>
+              <span class="drill-desc">Holster/Ready string with emergency reload</span>
+            </button>
+            <button type="button" class="drill-tile" data-drill="turned_holster">
+              <span class="drill-title">Turned 90°/180°/270°</span>
+              <span class="drill-desc">Start turned away, pivot, draw &amp; shoot #</span>
+            </button>
+            <button type="button" class="drill-tile" data-drill="walk_draw_shoot">
+              <span class="drill-title">Walk: 1st Draw, 2nd Shoot</span>
+              <span class="drill-desc">Walk toward/away; Signal 1 Draw, Signal 2 Fire #</span>
+            </button>
+            <button type="button" class="drill-tile" data-drill="contact_callout">
+              <span class="drill-title">Contact Threat Callout</span>
+              <span class="drill-desc">Random Front/Left/Right/Rear callout + # shots</span>
+            </button>
+          </div>
+
+          <div class="drill-summary-box" id="drillSummaryBox">
+            <strong>How this drill works:</strong> Counts down smoothly so you pace your draw stroke and break the shot at exactly the target time.
+          </div>
+
+          <!-- Dynamic Drill Parameters -->
+          <div class="params-grid">
+            <!-- Target / Par Time (used for Exact #s Draw and general Par time) -->
+            <div class="param-item" id="paramTargetSecondsWrap">
+              <label for="targetSecondsInput" id="targetSecondsLabel">Exact Draw Time (# sec)</label>
+              <div class="stepper-control">
+                <button type="button" class="step-btn" data-step-target="targetSecondsInput" data-step="-0.25">-</button>
+                <input type="number" id="targetSecondsInput" min="0.4" max="15" step="0.1" value="3.0" />
+                <button type="button" class="step-btn" data-step-target="targetSecondsInput" data-step="0.25">+</button>
+              </div>
+              <div class="quick-chips" id="dexterityQuickChips">
+                <button type="button" class="chip" data-set-time="5.0">5.0s Slow</button>
+                <button type="button" class="chip" data-set-time="3.0">3.0s Smooth</button>
+                <button type="button" class="chip" data-set-time="2.0">2.0s Crisp</button>
+                <button type="button" class="chip" data-set-time="1.2">1.2s Fast</button>
+                <button type="button" class="chip" data-set-time="0.7">Max Speed</button>
+              </div>
+            </div>
+
+            <!-- Number of Shots (#) -->
+            <div class="param-item" id="paramShotsWrap">
+              <label for="shotsCountInput" id="shotsCountLabel">Shots to Fire (#)</label>
+              <div class="stepper-control">
+                <button type="button" class="step-btn" data-step-target="shotsCountInput" data-step="-1">-</button>
+                <input type="number" id="shotsCountInput" min="1" max="30" step="1" value="1" />
+                <button type="button" class="step-btn" data-step-target="shotsCountInput" data-step="1">+</button>
+              </div>
+            </div>
+
+            <!-- Start Position (shown for Reload Drill & Contact Drill) -->
+            <div class="param-item hidden" id="paramStartPosWrap">
+              <label for="startPosSelect">Start Position</label>
+              <select id="startPosSelect">
+                <option value="Holster">Holstered</option>
+                <option value="High Ready">High Ready</option>
+                <option value="Low Ready">Low Ready</option>
+              </select>
+            </div>
+
+            <!-- Reload Modifier Toggle (Can be enabled on ANY drill!) -->
+            <div class="param-item" id="paramReloadToggleWrap">
+              <label class="toggle-row" for="includeReloadCheckbox">
+                <span>Include Reload Between Shots</span>
+                <input type="checkbox" id="includeReloadCheckbox" />
+              </label>
+            </div>
+
+            <!-- Post-Reload Shots (shown when Reload is enabled) -->
+            <div class="param-item hidden" id="paramPostReloadShotsWrap">
+              <label for="postReloadShotsInput">Shots After Reload (#)</label>
+              <div class="stepper-control">
+                <button type="button" class="step-btn" data-step-target="postReloadShotsInput" data-step="-1">-</button>
+                <input type="number" id="postReloadShotsInput" min="1" max="30" step="1" value="2" />
+                <button type="button" class="step-btn" data-step-target="postReloadShotsInput" data-step="1">+</button>
+              </div>
+            </div>
+
+            <!-- Turn Angle Variation (multiples of 90 deg) -->
+            <div class="param-item hidden" id="paramTurnAngleWrap">
+              <label for="turnAngleSelect">Turn Angle (90° Multiples)</label>
+              <select id="turnAngleSelect">
+                <option value="random">Random (90° L/R, 180°, 270°)</option>
+                <option value="90 Left">90° Left (Contact Right)</option>
+                <option value="90 Right">90° Right (Contact Left)</option>
+                <option value="180 Rear">180° Turned Away (Rear)</option>
+                <option value="270 Left">270° Pivot Left</option>
+                <option value="270 Right">270° Pivot Right</option>
+                <option value="360 Spin">360° Full Check &amp; Engage</option>
+              </select>
+            </div>
+
+            <!-- Walk Drill Settings (Walk Direction + 1st to 2nd Signal Delay) -->
+            <div class="param-item hidden" id="paramWalkDirectionWrap">
+              <label for="walkDirectionSelect">Walking Direction</label>
+              <select id="walkDirectionSelect">
+                <option value="random">Random (Towards or Away)</option>
+                <option value="Walk Towards Target">Walk Towards Target</option>
+                <option value="Walk Away From Target">Walk Away From Target</option>
+              </select>
+            </div>
+
+            <div class="param-item hidden" id="paramSecondSignalWrap">
+              <label for="secondSignalDelaySelect">Delay Between Draw (1st) &amp; Shoot (2nd)</label>
+              <select id="secondSignalDelaySelect">
+                <option value="random">Random (1.2s – 2.8s)</option>
+                <option value="1.0">Fast (1.0s after Draw signal)</option>
+                <option value="1.5">Medium (1.5s after Draw signal)</option>
+                <option value="2.2">Deliberate (2.2s after Draw signal)</option>
+                <option value="3.0">Hold Alignment (3.0s after Draw signal)</option>
+              </select>
+            </div>
+
+            <!-- Countdown & Standby Timing Options -->
+            <div class="param-item">
+              <label for="countdownModeSelect">Start Countdown &amp; Standby</label>
+              <select id="countdownModeSelect">
+                <option value="random_standby">"Ready" + Random Standby (1.5–3.5s)</option>
+                <option value="countdown_5">"5, 4, 3, 2, 1, Ready" + Random Delay</option>
+                <option value="countdown_5_instant">"5, 4, 3, 2, 1, Fire!" (Exact Cadence)</option>
+                <option value="instant">Immediate (1.0s after Start)</option>
+              </select>
+            </div>
+
+            <!-- Dexterity Paced Guide Option -->
+            <div class="param-item" id="paramPaceGuideWrap">
+              <label class="toggle-row" for="pacedVoiceGuideCheckbox">
+                <span>Audible Pace Ticks During Draw</span>
+                <input type="checkbox" id="pacedVoiceGuideCheckbox" checked />
+              </label>
+            </div>
+
+            <!-- Auto-Loop Repeat Option for Hands-Free Repetitions -->
+            <div class="param-item">
+              <label class="toggle-row" for="autoRepeatCheckbox">
+                <span>Auto-Repeat Drill (Hands-Free Loop)</span>
+                <input type="checkbox" id="autoRepeatCheckbox" />
+              </label>
+            </div>
+
+            <div class="param-item hidden" id="paramAutoRepeatDelayWrap">
+              <label for="autoRepeatSecInput">Rest / Holster Reset Time (sec)</label>
+              <div class="stepper-control">
+                <button type="button" class="step-btn" data-step-target="autoRepeatSecInput" data-step="-1">-</button>
+                <input type="number" id="autoRepeatSecInput" min="3" max="30" step="1" value="8" />
+                <button type="button" class="step-btn" data-step-target="autoRepeatSecInput" data-step="1">+</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: MIC, VOICE COMMANDS & AUDIO SOUNDBOARD -->
+      <section id="tab-audio" class="tab-panel">
+        <div class="card">
+          <div class="card-header">
+            <h2>GBB / Pistol Shot Detection</h2>
+            <span class="badge-subtle">Web Audio Transient Detector</span>
+          </div>
+          <p class="helper-text">
+            Tuned for Gas Blowback (GBB) and CO2 airsoft pistols. Disable noise suppression automatically so crisp muzzle/slide transients register accurately.
+          </p>
+
+          <div class="control-group">
+            <label for="thresholdSlider">
+              Shot Sensitivity Threshold: <strong id="thresholdSliderVal">62%</strong>
+            </label>
+            <input type="range" id="thresholdSlider" min="10" max="96" value="62" />
+            <div class="range-hints">
+              <span>More Sensitive (10%)</span>
+              <span>Less Sensitive / Loud GBB (96%)</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label for="debounceSlider">
+              GBB Blowback Echo Lockout (Debounce): <strong id="debounceSliderVal">115 ms</strong>
+            </label>
+            <input type="range" id="debounceSlider" min="50" max="350" step="5" value="115" />
+            <div class="range-hints">
+              <span>Fast Cycling (50ms)</span>
+              <span>Heavy Recoil / Indoor Echo (350ms)</span>
+            </div>
+          </div>
+
+          <div class="button-row">
+            <button type="button" id="calibrateMicBtn" class="btn-secondary">
+              Enable / Test Shot Mic
+            </button>
+            <button type="button" id="testBeepBtn" class="btn-secondary">
+              Test Timer Beep
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Hands-Free Control (Voice &amp; Double-Clap)</h2>
+            <span class="badge-subtle">No Touch Required</span>
+          </div>
+          <p class="helper-text">
+            Use voice commands when hands are on your replica, or enable <strong>Double-Clap / Loud Call Start</strong> which works 100% offline using only the acoustic microphone!
+          </p>
+
+          <div class="params-grid">
+            <div class="param-item">
+              <label class="toggle-row" for="enableSpeechRecCheckbox">
+                <span>Voice Recognition ("Ready", "Start", "Stop", "Repeat")</span>
+                <input type="checkbox" id="enableSpeechRecCheckbox" />
+              </label>
+            </div>
+            <div class="param-item">
+              <label class="toggle-row" for="enableClapStartCheckbox">
+                <span>Offline Double-Clap / Shout to Start When Idle</span>
+                <input type="checkbox" id="enableClapStartCheckbox" checked />
+              </label>
+            </div>
+          </div>
+
+          <div class="voice-cmd-reference">
+            <div><strong>"Start" / "Ready" / "Standby"</strong> &rarr; Starts current drill</div>
+            <div><strong>"Stop" / "Cease" / "Hold"</strong> &rarr; Cancels / stops drill</div>
+            <div><strong>"Repeat" / "Again"</strong> &rarr; Re-runs last drill</div>
+            <div><strong>"Next"</strong> &rarr; Cycles to next drill preset</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Audible Timer &amp; Tactical Callout Soundboard</h2>
+            <span class="badge-subtle">Offline TTS + Piezo Synth</span>
+          </div>
+
+          <div class="params-grid">
+            <div class="param-item">
+              <label for="signalStyleSelect">"Fire" Signal Style</label>
+              <select id="signalStyleSelect">
+                <option value="both">Voice ("Fire!") + Competition Beep</option>
+                <option value="beep">Competition Shot Timer Beep Only</option>
+                <option value="voice">Voice Callout Only ("Fire!")</option>
+              </select>
+            </div>
+
+            <div class="param-item">
+              <label for="beepFreqSelect">Timer Buzzer Pitch</label>
+              <select id="beepFreqSelect">
+                <option value="2400">2400 Hz (PACT / Competition Crisp)</option>
+                <option value="1800">1800 Hz (Mid Tactical Tone)</option>
+                <option value="1000">1000 Hz (Low Range Horn)</option>
+              </select>
+            </div>
+
+            <div class="param-item">
+              <label for="ttsRateSlider">Voice Callout Speed: <strong id="ttsRateVal">1.15x</strong></label>
+              <input type="range" id="ttsRateSlider" min="0.8" max="1.6" step="0.05" value="1.15" />
+            </div>
+          </div>
+
+          <h3 class="sub-heading">Tap to Test Any Audio Callout</h3>
+          <div class="soundboard-grid" id="soundboardGrid">
+            <button type="button" class="sb-btn" data-say="5, 4, 3, 2, 1">5-4-3-2-1</button>
+            <button type="button" class="sb-btn" data-say="Ready">Ready</button>
+            <button type="button" class="sb-btn" data-say="Standby">Standby</button>
+            <button type="button" class="sb-btn" data-say="Draw!">Draw!</button>
+            <button type="button" class="sb-btn" data-say="Fire!" data-beep="true">Fire! + Beep</button>
+            <button type="button" class="sb-btn" data-say="Reload!">Reload!</button>
+            <button type="button" class="sb-btn" data-say="Contact Front!">Contact Front</button>
+            <button type="button" class="sb-btn" data-say="Contact Left!">Contact Left</button>
+            <button type="button" class="sb-btn" data-say="Contact Right!">Contact Right</button>
+            <button type="button" class="sb-btn" data-say="Contact Rear!">Contact Rear</button>
+            <button type="button" class="sb-btn" data-say="Walk Forward">Walk Forward</button>
+            <button type="button" class="sb-btn" data-say="Cease Fire">Cease Fire</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: SHOT TIMINGS & DRILL LOGS -->
+      <section id="tab-logs" class="tab-panel">
+        <div class="card">
+          <div class="card-header">
+            <h2>Performance Summary</h2>
+            <div class="header-actions">
+              <select id="logFilterSelect" class="compact-select">
+                <option value="all">All Drills</option>
+                <option value="draw_exact">Exact #s Draw</option>
+                <option value="holster_shoot">Holster Shoot #</option>
+                <option value="high_ready">High Ready #</option>
+                <option value="low_ready">Low Ready #</option>
+                <option value="reload_drill">Shoot + Reload</option>
+                <option value="turned_holster">Turned 90°/180°</option>
+                <option value="walk_draw_shoot">Walk &amp; Draw</option>
+                <option value="contact_callout">Contact Callout</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="timer-metrics-grid stats-summary-grid">
+            <div class="metric-box">
+              <span class="metric-label">RUNS</span>
+              <span class="metric-value" id="statRunsCount">0</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">BEST 1ST SHOT</span>
+              <span class="metric-value" id="statBestFirst">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">AVG 1ST SHOT</span>
+              <span class="metric-value" id="statAvgFirst">--</span>
+            </div>
+            <div class="metric-box">
+              <span class="metric-label">BEST TOTAL</span>
+              <span class="metric-value" id="statBestTotal">--</span>
+            </div>
+          </div>
+
+          <div class="button-row">
+            <button type="button" id="exportCsvBtn" class="btn-secondary">Export CSV</button>
+            <button type="button" id="clearLogsBtn" class="btn-danger-outline">Clear History</button>
+          </div>
+        </div>
+
+        <div id="logsListContainer" class="logs-list">
+          <!-- Populated dynamically by script.js -->
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

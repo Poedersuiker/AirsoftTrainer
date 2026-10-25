@@ -1,0 +1,19 @@
+{
+  "name": "Tactical Airsoft Shot Timer & Drill Trainer",
+  "short_name": "AirsoftTimer",
+  "description": "Offline-ready airsoft GBB shot timer, hands-free voice drill commander, and split logger.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0f17",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
