@@ -377,7 +377,7 @@
             <!-- Dexterity Paced Guide Option -->
             <div class="param-item" id="paramPaceGuideWrap">
               <label class="toggle-row" for="pacedVoiceGuideCheckbox">
-                <span>Audible Pace Ticks During Exact #s Draw</span>
+                <span>Spoken Countdown ("Draw! # ... 2, 1, Fire!")</span>
                 <input type="checkbox" id="pacedVoiceGuideCheckbox" checked />
               </label>
             </div>
@@ -475,23 +475,34 @@
 
         <div class="card">
           <div class="card-header">
-            <h2>Hands-Free Voice Recognition</h2>
-            <span class="badge-subtle">Anti-Self-Trigger Protected</span>
+            <h2>"Ready" Voice Detection</h2>
+            <span class="badge-subtle">Vocal Band + Speech API</span>
           </div>
           <p class="helper-text">
-            When the app asks <em>"Shooter ready?"</em>, it pauses listening while its own speaker is active and only listens after its voice finishes.
+            After asking <em>"Shooter ready?"</em>, the app waits for its own voice echo to fade, measures room silence, and listens for your spoken <strong>"Ready"</strong> in the human vocal frequency band (works 100% offline).
           </p>
+
+          <div class="control-group">
+            <label for="voiceThresholdSlider">
+              "Ready" Voice Reply Sensitivity: <strong id="voiceThresholdSliderVal">18%</strong>
+            </label>
+            <input type="range" id="voiceThresholdSlider" min="6" max="60" value="18" />
+            <div class="range-hints">
+              <span>Soft Voice / Far Away (6%)</span>
+              <span>Loud Voice / Noisy Range (60%)</span>
+            </div>
+          </div>
 
           <div class="params-grid">
             <div class="param-item">
               <label class="toggle-row" for="enableSpeechRecCheckbox">
-                <span>Always-On Voice Commands ("Start", "Ready", "Stop")</span>
+                <span>Also Use Browser Speech-to-Text When Available</span>
                 <input type="checkbox" id="enableSpeechRecCheckbox" checked />
               </label>
             </div>
             <div class="param-item">
               <label class="toggle-row" for="enableAcousticReadyFallbackCheckbox">
-                <span>Offline Voice/Loud "Ready" Fallback (If Offline TTS/Speech Fails)</span>
+                <span>Detect Spoken "Ready" via Vocal Frequency Analyzer</span>
                 <input type="checkbox" id="enableAcousticReadyFallbackCheckbox" checked />
               </label>
             </div>

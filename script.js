@@ -1,8 +1,8 @@
 /**
  * Tactical Airsoft Shot Timer & Drill Trainer
  * Offline-First PWA with Wake Lock, Web Audio GBB Shot Detection,
- * Strict Anti-Self-Trigger Voice Recognition, 1st-Rep Drill Briefing,
- * "Shooter ready?" Voice Gate, Multi-Rep Drill Queue, and Split Logging.
+ * Vocal-Band "Ready" Detector + Speech API, 1st-Rep Drill Briefing,
+ * Spoken Draw Countdown ("Draw! # ... 2, 1, Fire!"), and Multi-Rep Queue.
  */
 
 (() => {
@@ -75,13 +75,12 @@
   // 2. APPLICATION STATE
   // ==========================================
   const state = {
-    // Builder form selection
     builderDrillId: 'draw_exact',
 
     // Drill Queue & Rep Tracking
     queue: [],
     activeQueueIndex: 0,
-    activeRepIndex: 1, // 1-based current repetition of active queued drill
+    activeRepIndex: 1,
 
     // Active run execution state
     // 'IDLE' | 'BRIEFING' | 'ASKING_READY' | 'WAITING_FOR_READY' | 'COUNTDOWN' | 'WALKING' | 'DRAWN_WAITING' | 'LIVE'
@@ -105,30 +104,37 @@
     wakeLockSentinel: null,
     wakeLockActive: false,
 
-    // Audio / Mic Detector
+    // Web Audio API: GBB Shot Transient + Vocal Formant Analyzer
     audioCtx: null,
     micStream: null,
     analyser: null,
     timeDomainData: null,
+    freqDomainData: null,
     micEnabled: false,
     micRafId: null,
     currentPeak: 0,
+    currentVocalEnergy: 0,
     peakHold: 0,
     peakHoldDecayTime: 0,
     thresholdPercent: 62,
+    voiceThresholdPercent: 18,
     debounceMs: 115,
     lastShotTimestampMs: 0,
 
-    // Strict Self-Audio Lockout Timestamps (prevents app from responding to its own voice/beeps)
+    // Self-Audio Lockout & "Ready" Vocal Envelope State
     muteShotDetectionUntilMs: 0,
     ignoreVoiceUntilMs: 0,
     readyListenEligibleAtMs: 0,
+    readyListenerArmed: false,
+    quietCalibrationSamples: [],
+    ambientVoiceFloor: 4,
+    vocalActiveFrames: 0,
+    vocalQuietTailFrames: 0,
     isSpeakingTts: false,
 
-    // Speech Recognition
+    // Optional Browser SpeechRecognition
     recognition: null,
     speechRecSupported: false,
-    speechRecHadNetworkError: false,
     voiceCmdEnabled: true,
     recognitionRunning: false,
     recognitionResumeTimer: null,
@@ -255,6 +261,8 @@
     calibrateMicBtn: document.getElementById('calibrateMicBtn'),
     testBeepBtn: document.getElementById('testBeepBtn'),
 
+    voiceThresholdSlider: document.getElementById('voiceThresholdSlider'),
+    voiceThresholdSliderVal: document.getElementById('voiceThresholdSliderVal'),
     enableSpeechRecCheckbox: document.getElementById('enableSpeechRecCheckbox'),
     enableAcousticReadyFallbackCheckbox: document.getElementById(
       'enableAcousticReadyFallbackCheckbox'
@@ -518,7 +526,7 @@
   );
 
   // ==========================================
-  // 8. WEB AUDIO API & STRICT SELF-AUDIO ISOLATION
+  // 8. WEB AUDIO API: PIEZO, TTS, GBB TRANSIENT & VOCAL FORMANT DETECTOR
   // ==========================================
   function ensureAudioContext() {
     if (!state.audioCtx) {
@@ -531,30 +539,21 @@
     return state.audioCtx;
   }
 
-  /**
-   * Returns true if the app's own TTS or piezo buzzer is currently playing
-   * or within its post-playback room-echo guard window.
-   */
   function isSelfAudioActive(nowMs = performance.now()) {
     const synthSpeaking =
       state.isSpeakingTts ||
       ('speechSynthesis' in window && window.speechSynthesis.speaking);
     if (synthSpeaking) {
-      // Continuously push lockout forward while speaker is active
       state.muteShotDetectionUntilMs = Math.max(
         state.muteShotDetectionUntilMs,
-        nowMs + 550
+        nowMs + 280
       );
-      state.ignoreVoiceUntilMs = Math.max(state.ignoreVoiceUntilMs, nowMs + 800);
+      state.ignoreVoiceUntilMs = Math.max(state.ignoreVoiceUntilMs, nowMs + 500);
       return true;
     }
     return nowMs < state.muteShotDetectionUntilMs;
   }
 
-  /**
-   * Plays a competition shot-timer piezo buzzer or cadence tick.
-   * Aborts voice recognition & locks out shot detection while playing.
-   */
   function playTimerBeep(durationMs = 220, freqHz = null, gainLevel = 0.65) {
     const ctx = ensureAudioContext();
     const frequency = freqHz || Number(el.beepFreqSelect.value) || 2400;
@@ -562,11 +561,11 @@
     const nowMs = performance.now();
     state.muteShotDetectionUntilMs = Math.max(
       state.muteShotDetectionUntilMs,
-      nowMs + durationMs + 180
+      nowMs + durationMs + 140
     );
     state.ignoreVoiceUntilMs = Math.max(
       state.ignoreVoiceUntilMs,
-      nowMs + durationMs + 450
+      nowMs + durationMs + 380
     );
 
     const osc = ctx.createOscillator();
@@ -588,36 +587,43 @@
   }
 
   /**
-   * Speaks a tactical cue via TTS while strictly suspending SpeechRecognition
-   * and locking out the acoustic microphone so the app NEVER responds to its own voice.
+   * Speaks a tactical phrase or single countdown word.
+   * Supports custom speech rate and post-speech guard duration.
    */
-  function speakCue(text, { onEnd = null, playBeepAfter = false } = {}) {
-    // 1. Immediately abort SpeechRecognition so its mic buffer doesn't record our speaker!
+  function speakCue(
+    text,
+    {
+      onEnd = null,
+      playBeepAfter = false,
+      rateOverride = null,
+      postGuardMs = 400
+    } = {}
+  ) {
     suspendSpeechRecognitionForSelfAudio();
 
     if (!('speechSynthesis' in window)) {
       if (playBeepAfter) playTimerBeep(240);
-      resumeSpeechRecognitionAfterSelfAudio(450);
-      if (onEnd) setTimeout(onEnd, 300);
+      if (onEnd) setTimeout(onEnd, 260);
       return;
     }
 
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = parseFloat(el.ttsRateSlider.value) || 1.05;
+    const baseRate = parseFloat(el.ttsRateSlider.value) || 1.05;
+    utter.rate = rateOverride || baseRate;
     utter.pitch = 0.96;
     utter.volume = 1.0;
 
-    const estimatedMs = Math.max(600, text.length * 75);
+    const estimatedMs = Math.max(320, text.length * 68);
     const nowMs = performance.now();
     state.isSpeakingTts = true;
     state.muteShotDetectionUntilMs = Math.max(
       state.muteShotDetectionUntilMs,
-      nowMs + estimatedMs + 600
+      nowMs + estimatedMs + postGuardMs
     );
     state.ignoreVoiceUntilMs = Math.max(
       state.ignoreVoiceUntilMs,
-      nowMs + estimatedMs + 850
+      nowMs + estimatedMs + postGuardMs + 200
     );
 
     let finished = false;
@@ -627,16 +633,16 @@
       state.isSpeakingTts = false;
 
       const endNow = performance.now();
-      // Keep a 500ms post-speech acoustic guard so room echo of the phone speaker dies completely
-      state.muteShotDetectionUntilMs = endNow + 450;
-      state.ignoreVoiceUntilMs = endNow + 650;
+      state.muteShotDetectionUntilMs = endNow + postGuardMs;
+      state.ignoreVoiceUntilMs = endNow + postGuardMs + 150;
 
       if (playBeepAfter) {
         playTimerBeep(240);
       }
 
-      // Resume voice recognition only after the speaker echo has died down
-      resumeSpeechRecognitionAfterSelfAudio(500);
+      if (state.phase === 'WAITING_FOR_READY' || state.phase === 'ASKING_READY') {
+        resumeSpeechRecognitionAfterSelfAudio(postGuardMs + 50);
+      }
 
       if (onEnd) onEnd();
     };
@@ -644,31 +650,34 @@
     utter.onend = finishHandler;
     utter.onerror = finishHandler;
 
-    // Poll speechSynthesis.speaking in case Android WebView takes longer or misses onend
     const safetyWatchdog = setTimeout(() => {
       if (!window.speechSynthesis.speaking) {
         finishHandler();
       } else {
-        setTimeout(finishHandler, 1500);
+        setTimeout(finishHandler, 900);
       }
-    }, estimatedMs + 1200);
+    }, estimatedMs + 950);
 
     state.timers.push(safetyWatchdog);
     window.speechSynthesis.speak(utter);
   }
 
+  /**
+   * Fires the primary "GO / FIRE" signal. Uses a short postGuardMs (160ms)
+   * so shots fired right after "Fire!" are never blocked by a long TTS cooldown.
+   */
   function triggerGoSignal(customVoiceText = 'Fire!', callbackOnSignalStart = null) {
     const style = el.signalStyleSelect.value;
     if (style === 'beep') {
-      playTimerBeep(260);
+      playTimerBeep(240);
       if (callbackOnSignalStart) callbackOnSignalStart();
     } else if (style === 'voice') {
       if (callbackOnSignalStart) callbackOnSignalStart();
-      speakCue(customVoiceText);
+      speakCue(customVoiceText, { rateOverride: 1.25, postGuardMs: 140 });
     } else {
-      playTimerBeep(240);
+      playTimerBeep(220);
       if (callbackOnSignalStart) callbackOnSignalStart();
-      speakCue(customVoiceText);
+      speakCue(customVoiceText, { rateOverride: 1.25, postGuardMs: 140 });
     }
   }
 
@@ -692,11 +701,12 @@
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.1;
+      analyser.smoothingTimeConstant = 0.15;
       source.connect(analyser);
 
       state.analyser = analyser;
       state.timeDomainData = new Uint8Array(analyser.fftSize);
+      state.freqDomainData = new Uint8Array(analyser.frequencyBinCount);
       state.micEnabled = true;
 
       el.micQuickToggleBtn.className = 'mic-pill pill-on';
@@ -708,7 +718,7 @@
     } catch (err) {
       console.error('Microphone access denied:', err);
       el.activeCueBanner.textContent =
-        'Mic permission needed for GBB detection (or use TAP SHOT).';
+        'Mic permission needed for GBB & Voice detection (or use buttons).';
       return false;
     }
   }
@@ -730,12 +740,46 @@
     el.peakValueLabel.textContent = '0%';
   }
 
+  /**
+   * Computes human vocal formant energy (200Hz - 2800Hz) from FFT frequency bins,
+   * scaled 0..100%. Much more sensitive to a spoken "Ready" from 1-2m away than
+   * raw time-domain peak!
+   */
+  function computeVocalBandEnergyPercent() {
+    if (!state.analyser || !state.freqDomainData || !state.audioCtx) return 0;
+    state.analyser.getByteFrequencyData(state.freqDomainData);
+
+    const sampleRate = state.audioCtx.sampleRate || 48000;
+    const binHz = sampleRate / state.analyser.fftSize;
+    const startBin = Math.max(2, Math.floor(200 / binHz));
+    const endBin = Math.min(
+      state.freqDomainData.length - 1,
+      Math.ceil(2800 / binHz)
+    );
+
+    let sum = 0;
+    let maxBin = 0;
+    let count = 0;
+    for (let i = startBin; i <= endBin; i++) {
+      const val = state.freqDomainData[i];
+      sum += val;
+      if (val > maxBin) maxBin = val;
+      count++;
+    }
+    if (count === 0) return 0;
+    const avg = sum / count;
+    // Blend average and peak formant bin, scaled into 0..100%
+    const blended = avg * 0.65 + maxBin * 0.35;
+    return Math.min(100, Math.round((blended / 190) * 100));
+  }
+
   function runMicLoop() {
     if (!state.micEnabled || !state.analyser) return;
 
     const nowMs = performance.now();
     const selfAudioBusy = isSelfAudioActive(nowMs);
 
+    // 1. Compute Time-Domain Peak (for sharp GBB gunshot transients)
     state.analyser.getByteTimeDomainData(state.timeDomainData);
     let maxDeviation = 0;
     const buf = state.timeDomainData;
@@ -743,23 +787,49 @@
       const dev = Math.abs(buf[i] - 128);
       if (dev > maxDeviation) maxDeviation = dev;
     }
+    const rawPeakPercent = Math.min(100, Math.round((maxDeviation / 128) * 100));
 
-    // While the app itself is speaking or beeping, show 0% on the GBB meter so the user sees it's muted
-    const peakPercent = selfAudioBusy
-      ? 0
-      : Math.min(100, Math.round((maxDeviation / 128) * 100));
+    // 2. Compute Vocal Formant Band Energy (for spoken "Ready" detection)
+    const rawVocalPercent = computeVocalBandEnergyPercent();
+
+    const peakPercent = selfAudioBusy ? 0 : rawPeakPercent;
+    const vocalPercent = selfAudioBusy ? 0 : rawVocalPercent;
+
     state.currentPeak = peakPercent;
+    state.currentVocalEnergy = vocalPercent;
 
-    if (peakPercent >= state.peakHold || nowMs > state.peakHoldDecayTime) {
-      state.peakHold = peakPercent;
+    // When waiting for "Ready", display the Vocal Energy on the top meter so the shooter sees their voice!
+    const isWaitingReady = state.phase === 'WAITING_FOR_READY';
+    const displayedMeterVal = isWaitingReady
+      ? Math.max(vocalPercent, peakPercent)
+      : peakPercent;
+    const displayedThreshold = isWaitingReady
+      ? Math.max(state.voiceThresholdPercent, state.ambientVoiceFloor + 7)
+      : state.thresholdPercent;
+
+    if (displayedMeterVal >= state.peakHold || nowMs > state.peakHoldDecayTime) {
+      state.peakHold = displayedMeterVal;
       state.peakHoldDecayTime = nowMs + 900;
     }
 
-    el.meterFill.style.width = `${peakPercent}%`;
+    el.meterFill.style.width = `${displayedMeterVal}%`;
     el.meterPeakHold.style.left = `${Math.min(99, state.peakHold)}%`;
-    el.peakValueLabel.textContent = `${peakPercent}%`;
+    el.meterThresholdLine.style.left = `${Math.min(98, displayedThreshold)}%`;
+    el.peakValueLabel.textContent = `${displayedMeterVal}%`;
 
+    // 3. If in WAITING_FOR_READY phase, run Vocal Formant Envelope Detector for "Ready"
     if (
+      isWaitingReady &&
+      !selfAudioBusy &&
+      nowMs >= state.readyListenEligibleAtMs &&
+      el.enableAcousticReadyFallbackCheckbox.checked
+    ) {
+      processVocalReadyEnvelope(displayedMeterVal, nowMs);
+    }
+
+    // 4. Check GBB Shot Threshold during LIVE / WALKING / DRAWN_WAITING
+    if (
+      !isWaitingReady &&
       !selfAudioBusy &&
       peakPercent >= state.thresholdPercent &&
       nowMs - state.lastShotTimestampMs >= state.debounceMs
@@ -771,32 +841,79 @@
     state.micRafId = requestAnimationFrame(runMicLoop);
   }
 
+  /**
+   * Detects when the shooter speaks "Ready" after "Shooter ready?" has finished:
+   * Step 1: Requires 8 quiet frames (~130ms) after the TTS echo guard to lock in room silence floor.
+   * Step 2: Detects a vocal energy rise >= effectiveThreshold lasting >= 3 frames (~50ms)
+   *         followed by word completion (or 14 continuous vocal frames ~230ms).
+   */
+  function processVocalReadyEnvelope(vocalLevel, nowMs) {
+    if (!state.readyListenerArmed) {
+      // Wait for room silence after "Shooter ready?" finishes playing
+      if (vocalLevel < 28) {
+        state.quietCalibrationSamples.push(vocalLevel);
+        if (state.quietCalibrationSamples.length >= 8) {
+          const sum = state.quietCalibrationSamples.reduce((a, b) => a + b, 0);
+          state.ambientVoiceFloor = Math.min(
+            20,
+            Math.max(2, Math.round(sum / state.quietCalibrationSamples.length))
+          );
+          state.readyListenerArmed = true;
+          state.vocalActiveFrames = 0;
+          state.vocalQuietTailFrames = 0;
+          el.activeCueBanner.textContent =
+            'Listening for "READY"... (Speak "Ready" now)';
+        }
+      } else {
+        // Still hearing speaker tail or background noise; reset quiet calibration
+        state.quietCalibrationSamples = [];
+      }
+      return;
+    }
+
+    const effectiveThreshold = Math.max(
+      state.voiceThresholdPercent,
+      state.ambientVoiceFloor + 7
+    );
+
+    if (vocalLevel >= effectiveThreshold) {
+      state.vocalActiveFrames++;
+      state.vocalQuietTailFrames = 0;
+      if (state.vocalActiveFrames >= 2) {
+        el.voiceHeardBanner.innerHTML = `Hearing voice reply (${vocalLevel}%)...`;
+      }
+      // If user has spoken clearly for ~220ms continuously, trigger immediately!
+      if (state.vocalActiveFrames >= 13) {
+        confirmShooterReady('Voice "Ready" Detected');
+      }
+    } else if (state.vocalActiveFrames >= 3) {
+      // User spoke >= 50ms and vocal level just dropped at end of word "Ready"
+      state.vocalQuietTailFrames++;
+      if (state.vocalQuietTailFrames >= 3) {
+        confirmShooterReady('Voice "Ready" Detected');
+      }
+    } else {
+      state.vocalActiveFrames = 0;
+      state.vocalQuietTailFrames = 0;
+    }
+  }
+
   function handleAcousticSpikeDetected(nowMs) {
     if (state.phase === 'LIVE') {
       registerShot(nowMs, 'MIC');
     } else if (state.phase === 'WALKING' || state.phase === 'DRAWN_WAITING') {
       state.prematureShots++;
       el.activeCueBanner.textContent = `EARLY SHOT DETECTED! Wait for 2nd "Fire!" signal!`;
-    } else if (
-      state.phase === 'WAITING_FOR_READY' &&
-      nowMs > state.readyListenEligibleAtMs &&
-      el.enableAcousticReadyFallbackCheckbox.checked &&
-      (!state.speechRecSupported || state.speechRecHadNetworkError || !navigator.onLine)
-    ) {
-      // Offline acoustic fallback when Web Speech API is unavailable/offline
-      el.voiceHeardBanner.innerHTML = `Voice/Audio Trigger Heard &rarr; <strong>"Ready!"</strong>`;
-      confirmShooterReady('Offline Voice Trigger');
     }
   }
 
   // ==========================================
-  // 9. HANDS-FREE VOICE RECOGNITION (ANTI-SELF-TRIGGER)
+  // 9. BROWSER SPEECH RECOGNITION (SUPPLEMENTARY)
   // ==========================================
   function initSpeechRecognition() {
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRec) {
       state.speechRecSupported = false;
-      el.voiceQuickBadge.textContent = 'Offline Mic';
       return;
     }
 
@@ -813,7 +930,6 @@
 
     rec.onresult = (event) => {
       const nowMs = performance.now();
-      // Strictly ignore anything captured while TTS/Buzzer was active or cooling down
       if (isSelfAudioActive(nowMs) || nowMs < state.ignoreVoiceUntilMs) {
         return;
       }
@@ -826,22 +942,11 @@
       }
     };
 
-    rec.onerror = (event) => {
-      if (event.error === 'network' || event.error === 'service-not-allowed') {
-        state.speechRecHadNetworkError = true;
-      }
-    };
+    rec.onerror = () => {};
 
     rec.onend = () => {
       state.recognitionRunning = false;
       updateHandsFreeQuickBadge();
-      // Auto-restart only if voice commands are enabled AND app is not currently speaking
-      if (
-        (state.voiceCmdEnabled || state.phase === 'WAITING_FOR_READY') &&
-        !isSelfAudioActive()
-      ) {
-        resumeSpeechRecognitionAfterSelfAudio(250);
-      }
     };
 
     state.recognition = rec;
@@ -854,7 +959,6 @@
     }
     if (state.recognition && state.recognitionRunning) {
       try {
-        // abort() discards buffered audio so the app never transcribes its own TTS output
         state.recognition.abort();
       } catch (_) {}
       state.recognitionRunning = false;
@@ -863,17 +967,14 @@
 
   function resumeSpeechRecognitionAfterSelfAudio(delayMs = 450) {
     if (!state.speechRecSupported || !state.recognition) return;
-    if (!state.voiceCmdEnabled && state.phase !== 'WAITING_FOR_READY') return;
+    if (!el.enableSpeechRecCheckbox.checked) return;
 
     if (state.recognitionResumeTimer) {
       clearTimeout(state.recognitionResumeTimer);
     }
 
     state.recognitionResumeTimer = setTimeout(() => {
-      if (isSelfAudioActive()) {
-        resumeSpeechRecognitionAfterSelfAudio(300);
-        return;
-      }
+      if (isSelfAudioActive()) return;
       if (!state.recognitionRunning) {
         try {
           state.recognition.start();
@@ -884,26 +985,24 @@
 
   function updateHandsFreeQuickBadge() {
     if (state.phase === 'WAITING_FOR_READY') {
-      el.voiceQuickBadge.textContent = 'Say "Ready"';
-    } else if (state.recognitionRunning) {
-      el.voiceQuickBadge.textContent = 'Voice: ON';
+      el.voiceQuickBadge.textContent = 'Listening: "Ready"';
+    } else if (state.micEnabled) {
+      el.voiceQuickBadge.textContent = 'Voice + Shot Ready';
     } else {
-      el.voiceQuickBadge.textContent = 'Voice: Standby';
+      el.voiceQuickBadge.textContent = 'Say "Ready"';
     }
   }
 
   let lastVoiceCommandTime = 0;
   function processVoiceCommand(phrase, nowMs = performance.now()) {
-    if (nowMs - lastVoiceCommandTime < 850) return;
+    if (nowMs - lastVoiceCommandTime < 800) return;
 
-    // Ignore exact echo of "shooter ready" if it ever leaked across boundary
     if (phrase === 'shooter' || phrase.includes('shooter ready')) {
       return;
     }
 
     el.voiceHeardBanner.innerHTML = `Heard: <strong>"${phrase}"</strong>`;
 
-    // 1. Stop / Cease command in any active phase
     if (
       phrase.includes('stop') ||
       phrase.includes('cease') ||
@@ -915,11 +1014,7 @@
       return;
     }
 
-    // 2. When waiting for shooter to answer "Shooter ready?"
-    if (state.phase === 'WAITING_FOR_READY') {
-      if (nowMs < state.readyListenEligibleAtMs) return;
-
-      // Match "ready" (plus common Android single-word phonetic transcriptions when standing back from phone)
+    if (state.phase === 'WAITING_FOR_READY' && state.readyListenerArmed) {
       const isReadyWord =
         phrase.includes('ready') ||
         phrase.includes('already') ||
@@ -935,25 +1030,7 @@
 
       if (isReadyWord) {
         lastVoiceCommandTime = nowMs;
-        confirmShooterReady(`Heard "${phrase}"`);
-      }
-      return;
-    }
-
-    // 3. When IDLE: allow voice "start" / "ready" / "next"
-    if (state.phase === 'IDLE') {
-      if (
-        phrase.includes('start') ||
-        phrase.includes('ready') ||
-        phrase.includes('go') ||
-        phrase.includes('repeat') ||
-        phrase.includes('again')
-      ) {
-        lastVoiceCommandTime = nowMs;
-        startActiveQueuedDrill();
-      } else if (phrase.includes('next')) {
-        lastVoiceCommandTime = nowMs;
-        stepQueue(1, false);
+        confirmShooterReady(`Speech "${phrase}"`);
       }
     }
   }
@@ -1170,7 +1247,6 @@
     const totalReps = activeItem.reps || 1;
     const { fullBriefing } = generateDrillBriefing(activeItem, false);
 
-    // Update Badges & Timer Start Page Bar
     el.queueCountNavBadge.textContent = totalDrills;
     el.queueTotalBadge.textContent = totalDrills;
     el.timerQueueCountLabel.textContent = totalDrills;
@@ -1179,7 +1255,6 @@
     el.currentDrillTitleDisplay.textContent = `${currentIdx + 1}. ${activeItem.name} (Rep ${currentRep} of ${totalReps})`;
     el.currentDrillBriefingDisplay.textContent = `"${fullBriefing}"`;
 
-    // Update idle Timer metrics preview
     const totalShots =
       activeItem.shots + (activeItem.includeReload ? activeItem.postReloadShots : 0);
     state.expectedTotalShots = totalShots;
@@ -1193,7 +1268,6 @@
         activeItem.drillId === 'draw_exact' ? 'TARGET PACE' : 'TARGET / PAR';
     }
 
-    // Render Queue List in Drills & Queue Menu
     el.drillQueueList.innerHTML = '';
     state.queue.forEach((item, idx) => {
       const isActive = idx === currentIdx;
@@ -1228,7 +1302,6 @@
 
   // ==========================================
   // 11. DRILL EXECUTION ENGINE
-  //     (1st-Rep Briefing -> "Shooter ready?" -> Wait for "Ready" -> Standby -> Fire)
   // ==========================================
   function clearAllDrillTimers() {
     state.timers.forEach((id) => clearTimeout(id));
@@ -1246,7 +1319,6 @@
   }
 
   async function startActiveQueuedDrill() {
-    // If user clicks Start while waiting for "Ready", treat the button click as manual "Ready!" confirmation
     if (state.phase === 'WAITING_FOR_READY') {
       confirmShooterReady('Manual Button Confirm');
       return;
@@ -1299,7 +1371,7 @@
     el.manualShotBtn.disabled = false;
     el.stopDrillBtn.disabled = false;
 
-    // REQUIREMENT: When a drill is done multiple times, the description is ONLY given the first time (Rep 1)!
+    // Only announce full description on Rep 1 of each drill
     const isFirstRepOfThisDrill = state.activeRepIndex === 1;
     const shouldAnnounceBriefing =
       isFirstRepOfThisDrill && el.announceDrillExplanationCheckbox.checked;
@@ -1308,23 +1380,20 @@
       setDrillPhaseUI('BRIEFING', `REP 1/${state.activeRunConfig.totalReps} BRIEFING`);
       el.activeCueBanner.textContent = resolvedBriefing.fullBriefing;
       speakCue(resolvedBriefing.fullBriefing, {
+        postGuardMs: 350,
         onEnd: () => {
           if (state.phase !== 'BRIEFING') return;
           scheduleTimeout(() => {
             if (state.phase !== 'BRIEFING') return;
             askShooterReadyGate();
-          }, 300);
+          }, 250);
         }
       });
     } else {
-      // Rep 2+ (or briefing unchecked): skip description and ask "Shooter ready?" directly
       askShooterReadyGate();
     }
   }
 
-  /**
-   * Asks "Shooter ready?" and waits until the shooter replies "Ready" (or taps Ready button)
-   */
   function askShooterReadyGate() {
     const cfg = state.activeRunConfig;
     if (!cfg) return;
@@ -1334,6 +1403,11 @@
       return;
     }
 
+    state.readyListenerArmed = false;
+    state.quietCalibrationSamples = [];
+    state.vocalActiveFrames = 0;
+    state.vocalQuietTailFrames = 0;
+
     setDrillPhaseUI(
       'ASKING_READY',
       `REP ${cfg.repNumber}/${cfg.totalReps} • ASKING READY`
@@ -1341,28 +1415,27 @@
     el.activeCueBanner.textContent = 'Asking: "Shooter ready?"...';
 
     speakCue('Shooter ready?', {
+      postGuardMs: 380,
       onEnd: () => {
         if (state.phase !== 'ASKING_READY') return;
 
-        // Wait 450ms after TTS ends so phone speaker reverb cannot self-trigger
         const nowMs = performance.now();
-        state.readyListenEligibleAtMs = nowMs + 450;
-        state.ignoreVoiceUntilMs = nowMs + 450;
-        state.muteShotDetectionUntilMs = nowMs + 450;
+        state.readyListenEligibleAtMs = nowMs + 380;
+        state.ignoreVoiceUntilMs = nowMs + 380;
+        state.muteShotDetectionUntilMs = nowMs + 380;
 
         setDrillPhaseUI(
           'WAITING_FOR_READY',
           `REP ${cfg.repNumber}/${cfg.totalReps} • SAY "READY"`
         );
         el.activeCueBanner.textContent =
-          'Listening for "READY"... (Say "Ready" or tap button below)';
+          'Calibrating room silence... Get ready to say "READY"';
 
-        // Enable primary button as a 1-tap "I'M READY" fallback as well
         el.startDrillBtn.disabled = false;
         el.startDrillBtn.textContent = 'SAY "READY" (OR TAP)';
 
         updateHandsFreeQuickBadge();
-        resumeSpeechRecognitionAfterSelfAudio(420);
+        resumeSpeechRecognitionAfterSelfAudio(380);
       }
     });
   }
@@ -1370,8 +1443,11 @@
   function confirmShooterReady(triggerSource = 'Voice') {
     if (state.phase !== 'WAITING_FOR_READY') return;
 
+    state.readyListenerArmed = false;
     el.startDrillBtn.disabled = true;
     el.startDrillBtn.textContent = 'START DRILL';
+    // Restore GBB shot threshold line on top meter
+    el.meterThresholdLine.style.left = `${state.thresholdPercent}%`;
     updateHandsFreeQuickBadge();
 
     el.voiceHeardBanner.innerHTML = `Confirmed Ready (${triggerSource}) &rarr; <strong>Starting Drill!</strong>`;
@@ -1389,6 +1465,14 @@
       return;
     }
 
+    // For Exact #s Draw: after Standby delay, it says "Draw!" and counts down aloud ("3, 2, 1, Fire!")
+    if (cfg.drillId === 'draw_exact') {
+      const randomDelayMs = Math.floor(1400 + Math.random() * 1800);
+      el.activeCueBanner.textContent = 'Standby for "Draw!" & Countdown...';
+      scheduleTimeout(() => runExactDrawSpokenCountdown(cfg), randomDelayMs);
+      return;
+    }
+
     const mode = el.countdownModeSelect.value;
     if (mode === 'countdown_5' || mode === 'countdown_5_instant') {
       runFiveSecondCountdown(mode === 'countdown_5_instant');
@@ -1396,11 +1480,71 @@
       el.activeCueBanner.textContent = `Standby...`;
       scheduleTimeout(() => beginLiveFirePhase(), 1000);
     } else {
-      // Random Standby Delay (1.5s - 3.5s) -> Fire!
       const randomDelayMs = Math.floor(1500 + Math.random() * 2000);
       el.activeCueBanner.textContent = 'Standby... Waiting for Signal...';
       scheduleTimeout(() => beginLiveFirePhase(), randomDelayMs);
     }
+  }
+
+  /**
+   * Executes the Exact #s Draw Drill:
+   * Announces "Draw!", then counts down aloud in spoken voice ("# ... 2 ... 1 ... Fire!")
+   * over the targetSec duration (no beeps during countdown).
+   */
+  function runExactDrawSpokenCountdown(cfg) {
+    const targetSec = Math.max(0.5, Number(cfg.targetSec) || 3.0);
+    const wholeSec = Math.round(targetSec);
+
+    setDrillPhaseUI('COUNTDOWN', `REP ${cfg.repNumber}/${cfg.totalReps} • DRAW!`);
+    el.activeCueBanner.textContent = `DRAW! Counting down ${targetSec}s to FIRE...`;
+    el.liveSplitsStrip.innerHTML = '';
+
+    // 1. Announce "Draw!" first
+    speakCue('Draw!', {
+      rateOverride: 1.25,
+      postGuardMs: 140,
+      onEnd: () => {
+        if (state.phase === 'IDLE') return;
+
+        // Start the visual timer clock & live shot listener at 0.00s as the #s draw countdown begins
+        state.signalTimestampMs = performance.now();
+        setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • DRAW COUNTDOWN`);
+        startClockAnimationLoop();
+
+        if (!cfg.pacedVoiceGuide || targetSec < 1.2) {
+          // For sub-second draws (or if spoken countdown unchecked), wait targetSec and call "Fire!"
+          scheduleTimeout(() => {
+            if (state.phase !== 'LIVE') return;
+            el.activeCueBanner.textContent = `FIRE! (${targetSec.toFixed(2)}s Mark)`;
+            speakCue('Fire!', { rateOverride: 1.3, postGuardMs: 130 });
+          }, Math.round(targetSec * 1000));
+          return;
+        }
+
+        // 2. Spoken countdown: e.g. for 3s -> "3" (at 0s), "2" (at 1s), "1" (at 2s), "Fire!" (at 3s)
+        for (let i = 0; i < wholeSec; i++) {
+          const countNum = wholeSec - i;
+          scheduleTimeout(() => {
+            if (state.phase !== 'LIVE') return;
+            el.activeCueBanner.textContent = `Draw Countdown: ${countNum}...`;
+            speakCue(String(countNum), {
+              rateOverride: 1.35,
+              postGuardMs: 130
+            });
+          }, i * 1000);
+        }
+
+        // 3. At exactly wholeSec (targetSec), speak "Fire!"
+        scheduleTimeout(() => {
+          if (state.phase !== 'LIVE') return;
+          el.activeCueBanner.textContent = `FIRE! (${targetSec.toFixed(2)}s Target Mark)`;
+          speakCue('Fire!', {
+            rateOverride: 1.3,
+            postGuardMs: 130
+          });
+        }, wholeSec * 1000);
+      }
+    });
   }
 
   function runFiveSecondCountdown(immediateFireAfterOne) {
@@ -1409,8 +1553,7 @@
       scheduleTimeout(() => {
         if (state.phase !== 'COUNTDOWN') return;
         el.activeCueBanner.textContent = `Countdown: ${step}...`;
-        playTimerBeep(70, 1200, 0.3);
-        speakCue(step);
+        speakCue(step, { rateOverride: 1.3, postGuardMs: 140 });
       }, idx * 1000);
     });
 
@@ -1432,6 +1575,7 @@
     el.activeCueBanner.textContent = `Begin ${walkPhrase} (Holstered)...`;
 
     speakCue(`Begin ${walkPhrase}`, {
+      postGuardMs: 250,
       onEnd: () => {
         if (state.phase !== 'WALKING') return;
         const walkTimeMs = Math.floor(2000 + Math.random() * 1800);
@@ -1441,8 +1585,7 @@
           state.firstSignalTimestampMs = performance.now();
           el.activeCueBanner.textContent =
             '1ST SIGNAL: DRAW WEAPON! (Wait for 2nd signal to shoot)';
-          playTimerBeep(140, 1500, 0.5);
-          speakCue('Draw!');
+          speakCue('Draw!', { rateOverride: 1.25, postGuardMs: 180 });
 
           const delayChoice = cfg.secondSignalDelay || 'random';
           const secondDelayMs =
@@ -1480,8 +1623,6 @@
       state.activeContextLabel = `${cfg.resolvedBriefing.shooterState} • ${voiceSignal} (Rep ${cfg.repNumber}/${cfg.totalReps})`;
     } else if (cfg.drillId === 'turned_holster') {
       voiceSignal = 'Turn and Fire!';
-    } else if (cfg.drillId === 'draw_exact') {
-      voiceSignal = cfg.targetSec >= 1.5 ? 'Draw!' : 'Fire!';
     }
 
     setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • LIVE FIRE!`);
@@ -1496,9 +1637,7 @@
     }
 
     const targetSec = Number(cfg.targetSec) || 2.0;
-    if (cfg.drillId === 'draw_exact') {
-      scheduleExactDrawPacingCues(targetSec, cfg.pacedVoiceGuide);
-    } else if (targetSec > 0) {
+    if (targetSec > 0) {
       scheduleTimeout(() => {
         if (state.phase === 'LIVE') {
           playTimerBeep(160, 1000, 0.45);
@@ -1507,28 +1646,6 @@
     }
 
     startClockAnimationLoop();
-  }
-
-  function scheduleExactDrawPacingCues(targetSec, useVoiceTicks) {
-    if (useVoiceTicks) {
-      const wholeSeconds = Math.floor(targetSec);
-      if (wholeSeconds >= 2) {
-        for (let s = 1; s < wholeSeconds; s++) {
-          const remaining = wholeSeconds - s;
-          scheduleTimeout(() => {
-            if (state.phase !== 'LIVE') return;
-            el.activeCueBanner.textContent = `Pacing Draw... ${remaining}s to Target Mark`;
-            playTimerBeep(55, 1400, 0.3);
-          }, s * 1000);
-        }
-      }
-    }
-
-    scheduleTimeout(() => {
-      if (state.phase !== 'LIVE') return;
-      el.activeCueBanner.textContent = `TARGET MARK (${targetSec.toFixed(2)}s) — FIRE!`;
-      playTimerBeep(220, 2600, 0.7);
-    }, Math.round(targetSec * 1000));
   }
 
   function startClockAnimationLoop() {
@@ -1589,7 +1706,7 @@
     ) {
       state.reloadCalled = true;
       el.activeCueBanner.textContent = 'RELOAD! Perform Speed Reload & Fire Follow-Up Shots!';
-      speakCue('Reload!');
+      speakCue('Reload!', { rateOverride: 1.25, postGuardMs: 180 });
       return;
     }
 
@@ -1614,7 +1731,7 @@
     el.parDeltaDisplay.textContent = `${deltaSign}${deltaSec.toFixed(2)}s`;
     el.parDeltaDisplay.style.color =
       cfg.drillId === 'draw_exact'
-        ? Math.abs(deltaSec) <= 0.2
+        ? Math.abs(deltaSec) <= 0.35
           ? 'var(--accent-green)'
           : 'var(--accent-amber)'
         : deltaSec <= 0
@@ -1624,7 +1741,7 @@
     setDrillPhaseUI('IDLE', `REP ${cfg.repNumber}/${cfg.totalReps} COMPLETE`);
 
     if (cfg.drillId === 'draw_exact') {
-      el.activeCueBanner.textContent = `Rep ${cfg.repNumber}/${cfg.totalReps} Done! Target: ${targetSec.toFixed(2)}s | Actual: ${totalSec.toFixed(2)}s (${deltaSign}${deltaSec.toFixed(2)}s)`;
+      el.activeCueBanner.textContent = `Rep ${cfg.repNumber}/${cfg.totalReps} Done! Target: ${targetSec.toFixed(2)}s | 1st: ${firstShotSec.toFixed(2)}s | Total: ${totalSec.toFixed(2)}s`;
     } else {
       el.activeCueBanner.textContent = `Rep ${cfg.repNumber}/${cfg.totalReps} Done! Total: ${totalSec.toFixed(2)}s | 1st Shot: ${firstShotSec.toFixed(2)}s`;
     }
@@ -1650,24 +1767,20 @@
       shots: state.shots
     });
 
-    // Advance Rep Counter or Advance to Next Drill in Queue
     const activeItem = getActiveQueuedDrill();
     const totalRepsForDrill = activeItem.reps || 1;
     let hasMoreInSet = false;
 
     if (el.autoAdvanceQueueCheckbox.checked) {
       if (state.activeRepIndex < totalRepsForDrill) {
-        // Stay on same drill, increment rep (next rep will skip description & go straight to "Shooter ready?")
         state.activeRepIndex++;
         hasMoreInSet = true;
       } else {
-        // Finished all reps of this drill! Move to next drill in queue (resetting rep to 1 so new drill gets explained)
         state.activeRepIndex = 1;
         if (state.activeQueueIndex + 1 < state.queue.length) {
           state.activeQueueIndex++;
           hasMoreInSet = true;
         } else {
-          // Completed entire queue; wrap back to first drill
           state.activeQueueIndex = 0;
           hasMoreInSet = false;
         }
@@ -1675,7 +1788,6 @@
       renderQueueUI();
     }
 
-    // Automatically prompt the next rep / drill after re-holster pause (where it asks "Shooter ready?")
     if (el.autoPromptReadyCheckbox.checked && hasMoreInSet) {
       const restSec = Math.max(2, parseInt(el.autoRepeatSecInput.value, 10) || 4);
       el.activeCueBanner.textContent += ` • Next rep in ${restSec}s...`;
@@ -1693,6 +1805,7 @@
       window.speechSynthesis.cancel();
     }
     state.isSpeakingTts = false;
+    state.readyListenerArmed = false;
 
     if (state.phase === 'LIVE' && state.shots.length > 0) {
       completeDrillRun();
@@ -1706,6 +1819,7 @@
     el.startDrillBtn.textContent = 'START DRILL';
     el.manualShotBtn.disabled = true;
     el.stopDrillBtn.disabled = true;
+    el.meterThresholdLine.style.left = `${state.thresholdPercent}%`;
     updateHandsFreeQuickBadge();
   }
 
@@ -1881,7 +1995,6 @@
   // 13. EVENT LISTENERS & UI BINDINGS
   // ==========================================
   function bindEvents() {
-    // Hamburger Menu Drawer
     el.menuToggleBtn.addEventListener('click', openDrawer);
     el.closeDrawerBtn.addEventListener('click', closeDrawer);
     el.navBackdrop.addEventListener('click', closeDrawer);
@@ -1892,11 +2005,9 @@
       });
     });
 
-    // Top Bar Quick Controls
     el.micQuickToggleBtn.addEventListener('click', () => toggleMicDetector());
     el.wakeLockBtn.addEventListener('click', toggleWakeLock);
 
-    // Sync Voice Briefing Toggle on Timer view & Settings view
     el.quickExplainToggle.addEventListener('change', () => {
       el.announceDrillExplanationCheckbox.checked = el.quickExplainToggle.checked;
     });
@@ -1904,19 +2015,16 @@
       el.quickExplainToggle.checked = el.announceDrillExplanationCheckbox.checked;
     });
 
-    // Timer View Queue Navigation
     el.prevQueueBtn.addEventListener('click', () => stepQueue(-1));
     el.nextQueueBtn.addEventListener('click', () => stepQueue(1));
     el.openDrillsMenuBtn.addEventListener('click', () => switchView('view-drills'));
 
-    // Primary Timer Controls
     el.startDrillBtn.addEventListener('click', startActiveQueuedDrill);
     el.manualShotBtn.addEventListener('click', () =>
       registerShot(performance.now(), 'TAP')
     );
     el.stopDrillBtn.addEventListener('click', () => stopDrill('Drill stopped'));
 
-    // Drill Builder Tiles & Inputs
     el.drillTiles.forEach((tile) => {
       tile.addEventListener('click', () => {
         selectBuilderDrillTile(tile.dataset.drill);
@@ -1966,7 +2074,6 @@
       speakCue(fullBriefing);
     });
 
-    // Add to Queue / Run Single Drill
     el.addToQueueBtn.addEventListener('click', () => {
       const newItem = getBuilderDrillItem();
       state.queue.push(newItem);
@@ -1986,7 +2093,6 @@
       switchView('view-timer');
     });
 
-    // Queue List Actions (Adjust Reps, Move Up/Down, Delete, Select)
     el.drillQueueList.addEventListener('click', (e) => {
       const repBtn = e.target.closest('[data-q-rep-delta]');
       if (repBtn) {
@@ -2076,7 +2182,18 @@
       const val = parseInt(el.thresholdSlider.value, 10);
       state.thresholdPercent = val;
       el.thresholdSliderVal.textContent = `${val}%`;
-      el.meterThresholdLine.style.left = `${val}%`;
+      if (state.phase !== 'WAITING_FOR_READY') {
+        el.meterThresholdLine.style.left = `${val}%`;
+      }
+    });
+
+    el.voiceThresholdSlider.addEventListener('input', () => {
+      const val = parseInt(el.voiceThresholdSlider.value, 10);
+      state.voiceThresholdPercent = val;
+      el.voiceThresholdSliderVal.textContent = `${val}%`;
+      if (state.phase === 'WAITING_FOR_READY') {
+        el.meterThresholdLine.style.left = `${val}%`;
+      }
     });
 
     el.debounceSlider.addEventListener('input', () => {
@@ -2087,16 +2204,6 @@
 
     el.calibrateMicBtn.addEventListener('click', () => toggleMicDetector());
     el.testBeepBtn.addEventListener('click', () => playTimerBeep(240));
-
-    el.enableSpeechRecCheckbox.addEventListener('change', () => {
-      state.voiceCmdEnabled = el.enableSpeechRecCheckbox.checked;
-      if (state.voiceCmdEnabled) {
-        resumeSpeechRecognitionAfterSelfAudio(100);
-      } else {
-        suspendSpeechRecognitionForSelfAudio();
-      }
-      updateHandsFreeQuickBadge();
-    });
 
     el.ttsRateSlider.addEventListener('input', () => {
       el.ttsRateVal.textContent = `${parseFloat(el.ttsRateSlider.value).toFixed(2)}x`;
