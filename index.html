@@ -9,8 +9,8 @@
   <title>Airsoft Shot Timer &amp; Drill Trainer</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
-  <link rel="apple-touch-icon" href="icon.svg" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="stylesheet" href="style.css?v=1.9" />
 </head>
 <body>
   <div class="app-shell">
@@ -47,6 +47,7 @@
           <span class="wake-dot"></span>
           <span id="wakeLockText">LOCK</span>
         </button>
+        <button id="installPwaBtn" class="hidden" type="button" aria-hidden="true"></button>
       </div>
     </header>
 
@@ -57,7 +58,7 @@
         <div class="drawer-brand">
           <img src="icon.svg" alt="Reticle" class="brand-icon" />
           <div>
-            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v1.8</span></strong>
+            <strong>AIRSOFT TRAINER <span id="appVersionBadge" class="version-text">v1.9</span></strong>
             <span id="offlineStatusText" class="drawer-subtitle">Offline PWA Ready</span>
           </div>
         </div>
@@ -87,7 +88,7 @@
           + Install / Cache Offline App
         </button>
         <div id="installHelpNote" class="helper-text hidden" style="font-size:0.72rem;color:#fde68a;margin-bottom:0.45rem;"></div>
-        <div>App Version: <strong>v1.8</strong></div>
+        <div>App Version: <strong>v1.9</strong></div>
       </div>
     </aside>
 
@@ -620,6 +621,6 @@
     </main>
   </div>
 
-  <script src="script.js"></script>
+  <script src="script.js?v=1.9"></script>
 </body>
 </html>

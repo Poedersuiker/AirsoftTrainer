@@ -476,7 +476,7 @@
       // Explicitly cache all assets offline & show browser install instructions
       if ('caches' in window) {
         try {
-          const cache = await caches.open('airsoft-trainer-v1.8');
+          const cache = await caches.open('airsoft-trainer-v1.9');
           await cache.addAll([
             './',
             './index.html',
@@ -620,14 +620,14 @@
     const frequency = freqHz || Number(el.beepFreqSelect.value) || 2400;
 
     const nowMs = performance.now();
-    // Only mute shot detector during the brief hardware piezo tone itself
+    // Mute shot detector during the piezo tone + brief acoustic decay
     state.muteShotDetectionUntilMs = Math.max(
       state.muteShotDetectionUntilMs,
-      nowMs + durationMs + 50
+      nowMs + durationMs + 85
     );
     state.ignoreVoiceUntilMs = Math.max(
       state.ignoreVoiceUntilMs,
-      nowMs + durationMs + 350
+      nowMs + durationMs + 380
     );
 
     const osc = ctx.createOscillator();
@@ -650,8 +650,11 @@
 
   /**
    * Speaks a tactical phrase or countdown number.
-   * IMPORTANT: Does NOT mute the Shot Crack detector (muteShotDetectionUntilMs is untouched),
-   * so shots fired during a countdown or right on "Fire!" are always registered!
+   * - When isLiveCue === false (Briefing, "Shooter ready?", "Draw!", "3, 2, 1", Soundboard):
+   *   mutes the shot detector for the entire TTS speech + 280ms tail so the app NEVER triggers on its own voice.
+   * - When isLiveCue === true ("Fire!", "Reload!", etc. during LIVE fire):
+   *   mutes the shot detector ONLY for the short physical vowel burst (~260ms from onstart) without
+   *   waiting on Android's lagging speechSynthesis.speaking flag, so the shooter's 1st shot is always registered!
    */
   function speakCue(
     text,
@@ -659,7 +662,8 @@
       onEnd = null,
       playBeepAfter = false,
       rateOverride = null,
-      postGuardMs = 350
+      postGuardMs = 350,
+      isLiveCue = false
     } = {}
   ) {
     suspendSpeechRecognitionForSelfAudio();
@@ -677,13 +681,39 @@
     utter.pitch = 0.96;
     utter.volume = 1.0;
 
-    const estimatedMs = Math.max(260, text.length * 65);
+    const estimatedMs = Math.max(300, text.length * 65);
+    const liveAudioDurationMs = Math.min(620, Math.max(260, text.length * 42));
     const nowMs = performance.now();
-    state.isSpeakingTts = true;
+
+    state.isSpeakingTts = !isLiveCue;
     state.ignoreVoiceUntilMs = Math.max(
       state.ignoreVoiceUntilMs,
       nowMs + estimatedMs + postGuardMs
     );
+
+    if (isLiveCue) {
+      state.muteShotDetectionUntilMs = Math.max(
+        state.muteShotDetectionUntilMs,
+        nowMs + liveAudioDurationMs + 140
+      );
+    } else {
+      state.muteShotDetectionUntilMs = Math.max(
+        state.muteShotDetectionUntilMs,
+        nowMs + estimatedMs + 320
+      );
+    }
+
+    utter.onstart = () => {
+      const startNow = performance.now();
+      if (isLiveCue) {
+        state.muteShotDetectionUntilMs = startNow + liveAudioDurationMs;
+      } else {
+        state.muteShotDetectionUntilMs = Math.max(
+          state.muteShotDetectionUntilMs,
+          startNow + estimatedMs + 280
+        );
+      }
+    };
 
     let finished = false;
     const finishHandler = () => {
@@ -692,7 +722,22 @@
       state.isSpeakingTts = false;
 
       const endNow = performance.now();
-      state.ignoreVoiceUntilMs = endNow + postGuardMs;
+      state.ignoreVoiceUntilMs = Math.max(
+        state.ignoreVoiceUntilMs,
+        endNow + postGuardMs
+      );
+
+      if (isLiveCue) {
+        state.muteShotDetectionUntilMs = Math.min(
+          state.muteShotDetectionUntilMs,
+          endNow + 35
+        );
+      } else {
+        state.muteShotDetectionUntilMs = Math.max(
+          state.muteShotDetectionUntilMs,
+          endNow + 280
+        );
+      }
 
       if (playBeepAfter) {
         playTimerBeep(180);
@@ -722,8 +767,8 @@
 
   /**
    * Fires the primary "GO / FIRE" signal.
-   * Starts the shot timer clock BEFORE speaking "Fire!" and never mutes the shot detector for TTS,
-   * so fast shots right on "Fire!" are captured 100% of the time.
+   * Uses a tight live-cue mute window (~260ms) so "Fire!" never triggers a fake shot,
+   * while immediately opening the shot detector right after the word "Fire!" finishes.
    */
   function triggerGoSignal(customVoiceText = 'Fire!', callbackOnSignalStart = null) {
     const style = el.signalStyleSelect.value;
@@ -732,11 +777,17 @@
     if (style === 'beep') {
       playTimerBeep(160);
     } else if (style === 'voice') {
-      speakCue(customVoiceText, { rateOverride: 1.3, postGuardMs: 100 });
+      speakCue(customVoiceText, {
+        rateOverride: 1.45,
+        postGuardMs: 120,
+        isLiveCue: true
+      });
     } else {
-      // 'both': speak "Fire!" immediately without a long piezo mute so 1st shot is never blocked
-      playTimerBeep(90);
-      speakCue(customVoiceText, { rateOverride: 1.3, postGuardMs: 100 });
+      speakCue(customVoiceText, {
+        rateOverride: 1.45,
+        postGuardMs: 120,
+        isLiveCue: true
+      });
     }
   }
 
@@ -915,27 +966,22 @@
     } else {
       // ====================================================
       // MODE B: SHOT CRACK MODE (COUNTDOWN & LIVE FIRE)
-      // Strictly listens ONLY for the crack of a shot!
-      // NEVER muted by spoken TTS ("Draw!", "3, 2, 1", "Fire!")
+      // Strictly listens ONLY for the crack of a shot, while ignoring app audio!
       // ====================================================
-      const piezoBusy = nowMs < state.muteShotDetectionUntilMs;
-      const hfCrack = computeHighFreqCrackEnergy();
-      const synthSpeaking =
-        state.isSpeakingTts ||
-        ('speechSynthesis' in window && window.speechSynthesis.speaking);
-
-      // If TTS is speaking, require either high-frequency shot crack energy (>=12%) or strong transient spike
-      // so the phone speaker talking doesn't false-trigger, while a real GBB shot crack passes right through!
-      let shotCrackPercent = 0;
-      if (!piezoBusy) {
-        if (!synthSpeaking) {
-          shotCrackPercent = rawPeakPercent;
-        } else if (hfCrack >= 12 || rawPeakPercent >= state.thresholdPercent) {
-          shotCrackPercent = rawPeakPercent;
-        } else {
-          shotCrackPercent = Math.round(rawPeakPercent * 0.35);
+      if (state.phase !== 'LIVE') {
+        const synthSpeaking =
+          state.isSpeakingTts ||
+          ('speechSynthesis' in window && window.speechSynthesis.speaking);
+        if (synthSpeaking) {
+          state.muteShotDetectionUntilMs = Math.max(
+            state.muteShotDetectionUntilMs,
+            nowMs + 280
+          );
         }
       }
+
+      const shotMuted = nowMs < state.muteShotDetectionUntilMs;
+      const shotCrackPercent = shotMuted ? 0 : rawPeakPercent;
 
       state.currentPeak = shotCrackPercent;
 
@@ -950,7 +996,7 @@
       el.peakValueLabel.textContent = `${shotCrackPercent}%`;
 
       if (
-        !piezoBusy &&
+        !shotMuted &&
         shotCrackPercent >= state.thresholdPercent &&
         nowMs - state.lastShotTimestampMs >= state.debounceMs
       ) {
@@ -1014,19 +1060,6 @@
 
   function handleAcousticSpikeDetected(nowMs) {
     if (state.phase === 'LIVE') {
-      registerShot(nowMs, 'MIC');
-    } else if (state.phase === 'COUNTDOWN') {
-      // If a shot crack occurs during the countdown (or right as "Fire!" is being announced),
-      // transition into LIVE if needed and register the 1st shot immediately so it is never lost!
-      if (!state.signalTimestampMs) {
-        state.signalTimestampMs = nowMs - 10;
-      }
-      const cfg = state.activeRunConfig;
-      setDrillPhaseUI(
-        'LIVE',
-        cfg ? `REP ${cfg.repNumber}/${cfg.totalReps} • LIVE FIRE!` : 'LIVE FIRE!'
-      );
-      startClockAnimationLoop();
       registerShot(nowMs, 'MIC');
     } else if (state.phase === 'WALKING' || state.phase === 'DRAWN_WAITING') {
       state.prematureShots++;
@@ -1629,49 +1662,71 @@
     el.activeCueBanner.textContent = `DRAW! Counting down ${targetSec}s to FIRE...`;
     el.liveSplitsStrip.innerHTML = '';
 
-    // 1. Announce "Draw!" first
+    // 1. Announce "Draw!" first while in COUNTDOWN phase
     speakCue('Draw!', {
       rateOverride: 1.25,
-      postGuardMs: 140,
+      postGuardMs: 180,
+      isLiveCue: false,
       onEnd: () => {
         if (state.phase === 'IDLE') return;
 
-        // Start the visual timer clock & live shot listener at 0.00s as the #s draw countdown begins
+        // Start the visual timer clock at 0.00s as the #s draw countdown begins
         state.signalTimestampMs = performance.now();
-        setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • DRAW COUNTDOWN`);
         startClockAnimationLoop();
 
         if (!cfg.pacedVoiceGuide || targetSec < 1.2) {
-          // For sub-second draws (or if spoken countdown unchecked), wait targetSec and call "Fire!"
+          setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • DRAW COUNTDOWN`);
           scheduleTimeout(() => {
             if (state.phase !== 'LIVE') return;
             el.activeCueBanner.textContent = `FIRE! (${targetSec.toFixed(2)}s Mark)`;
-            speakCue('Fire!', { rateOverride: 1.3, postGuardMs: 130 });
+            if (state.shots.length === 0) {
+              speakCue('Fire!', {
+                rateOverride: 1.45,
+                postGuardMs: 120,
+                isLiveCue: true
+              });
+            }
           }, Math.round(targetSec * 1000));
           return;
         }
 
-        // 2. Spoken countdown: e.g. for 3s -> "3" (at 0s), "2" (at 1s), "1" (at 2s), "Fire!" (at 3s)
+        // 2. Spoken countdown in COUNTDOWN phase so spoken numbers ("3", "2", "1") never register as shots
         for (let i = 0; i < wholeSec; i++) {
           const countNum = wholeSec - i;
           scheduleTimeout(() => {
-            if (state.phase !== 'LIVE') return;
+            if (state.phase !== 'COUNTDOWN' && state.phase !== 'LIVE') return;
             el.activeCueBanner.textContent = `Draw Countdown: ${countNum}...`;
             speakCue(String(countNum), {
               rateOverride: 1.35,
-              postGuardMs: 130
+              postGuardMs: 180,
+              isLiveCue: false
             });
           }, i * 1000);
         }
 
-        // 3. At exactly wholeSec (targetSec), speak "Fire!"
+        // Arm LIVE shot listener right after "1" finishes playing (320ms before "Fire!")
+        const armLiveMs = Math.max(100, wholeSec * 1000 - 320);
         scheduleTimeout(() => {
-          if (state.phase !== 'LIVE') return;
+          if (state.phase !== 'COUNTDOWN') return;
+          state.isSpeakingTts = false;
+          state.muteShotDetectionUntilMs = 0;
+          setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • LIVE FIRE!`);
+        }, armLiveMs);
+
+        // 3. At exactly wholeSec (targetSec), speak "Fire!" with tight live-cue mute
+        scheduleTimeout(() => {
+          if (state.phase !== 'COUNTDOWN' && state.phase !== 'LIVE') return;
+          if (state.phase !== 'LIVE') {
+            setDrillPhaseUI('LIVE', `REP ${cfg.repNumber}/${cfg.totalReps} • LIVE FIRE!`);
+          }
           el.activeCueBanner.textContent = `FIRE! (${targetSec.toFixed(2)}s Target Mark)`;
-          speakCue('Fire!', {
-            rateOverride: 1.3,
-            postGuardMs: 130
-          });
+          if (state.shots.length === 0) {
+            speakCue('Fire!', {
+              rateOverride: 1.45,
+              postGuardMs: 120,
+              isLiveCue: true
+            });
+          }
         }, wholeSec * 1000);
       }
     });
@@ -1779,8 +1834,17 @@
   }
 
   function startClockAnimationLoop() {
+    if (state.rafId) {
+      cancelAnimationFrame(state.rafId);
+      state.rafId = null;
+    }
     const tick = () => {
-      if (state.phase !== 'LIVE') return;
+      if (
+        state.phase !== 'LIVE' &&
+        !(state.phase === 'COUNTDOWN' && state.signalTimestampMs > 0)
+      ) {
+        return;
+      }
       const elapsedSec = (performance.now() - state.signalTimestampMs) / 1000;
       el.clockDisplay.innerHTML = `${elapsedSec.toFixed(2)}<span class="clock-unit">s</span>`;
       state.rafId = requestAnimationFrame(tick);
@@ -1836,7 +1900,11 @@
     ) {
       state.reloadCalled = true;
       el.activeCueBanner.textContent = 'RELOAD! Perform Speed Reload & Fire Follow-Up Shots!';
-      speakCue('Reload!', { rateOverride: 1.25, postGuardMs: 180 });
+      speakCue('Reload!', {
+        rateOverride: 1.35,
+        postGuardMs: 140,
+        isLiveCue: true
+      });
       return;
     }
 
@@ -2379,12 +2447,20 @@
   // 14. BOOTSTRAP
   // ==========================================
   function init() {
-    initPWA();
-    initSpeechRecognition();
     bindEvents();
     selectBuilderDrillTile('draw_exact');
     loadQueueFromStorage();
     loadLogsFromStorage();
+    try {
+      initPWA();
+    } catch (err) {
+      console.warn('PWA init warning:', err);
+    }
+    try {
+      initSpeechRecognition();
+    } catch (err) {
+      console.warn('SpeechRecognition init warning:', err);
+    }
     updateHandsFreeQuickBadge();
   }
 
